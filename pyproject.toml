@@ -1,0 +1,24 @@
+[project]
+name = "lance-cuvs"
+version = "5.0.0b2"
+description = "cuVS-backed vector index build backend for Lance"
+authors = [{ name = "Lance Devs", email = "dev@lance.org" }]
+license = { text = "Apache-2.0" }
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = ["numpy>=1.22", "pylance>=5.0.0b2"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+]
+
+[build-system]
+requires = ["maturin>=1.4,<2"]
+build-backend = "maturin"
+
+[tool.maturin]
+python-source = "python"
+module-name = "lance_cuvs._native"
+features = ["python"]
