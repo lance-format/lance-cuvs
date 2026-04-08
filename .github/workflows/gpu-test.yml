@@ -49,6 +49,7 @@ jobs:
             clang \
             curl \
             git \
+            libprotobuf-dev \
             libssl-dev \
             pkg-config \
             protobuf-compiler
