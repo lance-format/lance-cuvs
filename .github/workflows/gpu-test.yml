@@ -65,12 +65,12 @@ jobs:
         run: uv sync --group dev --no-install-project
 
       - name: Export RAPIDS build paths
-        run: uv run python tools/rapids_env.py --format github-env >> "$GITHUB_ENV"
+        run: .venv/bin/python tools/rapids_env.py --format github-env >> "$GITHUB_ENV"
 
       - name: Build extension in-place
-        run: uv run maturin develop --release
+        run: .venv/bin/maturin develop --release
 
       - name: Run Python smoke test
         env:
           LANCE_CUVS_REQUIRE_GPU: "1"
-        run: uv run pytest -q tests/test_smoke.py
+        run: .venv/bin/pytest -q tests/test_smoke.py

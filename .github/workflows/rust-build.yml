@@ -44,7 +44,7 @@ jobs:
         run: uv sync --group dev --no-install-project
 
       - name: Export RAPIDS build paths
-        run: uv run python tools/rapids_env.py --format github-env >> "$GITHUB_ENV"
+        run: .venv/bin/python tools/rapids_env.py --format github-env >> "$GITHUB_ENV"
 
       - name: Build Rust crate
-        run: uv run cargo build --all-targets
+        run: cargo build --all-targets

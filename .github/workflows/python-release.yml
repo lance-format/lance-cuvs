@@ -44,13 +44,13 @@ jobs:
         run: uv sync --group dev --no-install-project
 
       - name: Export RAPIDS build paths
-        run: uv run python tools/rapids_env.py --format github-env >> "$GITHUB_ENV"
+        run: .venv/bin/python tools/rapids_env.py --format github-env >> "$GITHUB_ENV"
 
       - name: Build wheel
-        run: uv run maturin build --release --out dist
+        run: .venv/bin/maturin build --release --out dist
 
       - name: Build source distribution
-        run: uv run maturin sdist --out dist
+        run: .venv/bin/maturin sdist --out dist
 
       - uses: actions/upload-artifact@v4
         with:
