@@ -1,6 +1,6 @@
 [package]
 name = "lance-cuvs"
-version = "5.0.0-beta.2"
+version = "0.1.0"
 edition = "2024"
 authors = ["Lance Devs <dev@lance.org>"]
 license = "Apache-2.0"
@@ -24,18 +24,18 @@ cuvs = "26.2.0"
 cuvs-sys = "26.2.0"
 futures = "0.3"
 half = { version = "2.5", default-features = false, features = ["num-traits", "std"] }
-lance = { path = "../lance/rust/lance" }
-lance-arrow = { path = "../lance/rust/lance-arrow" }
-lance-core = { path = "../lance/rust/lance-core" }
-lance-file = { path = "../lance/rust/lance-file" }
-lance-index = { path = "../lance/rust/lance-index" }
-lance-io = { path = "../lance/rust/lance-io" }
-lance-linalg = { path = "../lance/rust/lance-linalg" }
+lance = { git = "https://github.com/lance-format/lance.git" }
+lance-arrow = { git = "https://github.com/lance-format/lance.git" }
+lance-core = { git = "https://github.com/lance-format/lance.git" }
+lance-file = { git = "https://github.com/lance-format/lance.git" }
+lance-index = { git = "https://github.com/lance-format/lance.git" }
+lance-io = { git = "https://github.com/lance-format/lance.git" }
+lance-linalg = { git = "https://github.com/lance-format/lance.git" }
 log = "0.4"
 ndarray = { version = "0.16.1", features = ["matrixmultiply-threading"] }
 numpy = { version = "0.26", optional = true }
 pyo3 = { version = "0.26", optional = true, features = [
     "extension-module",
-    "abi3-py39",
+    "abi3-py312",
 ] }
 tokio = { version = "1.48", features = ["rt-multi-thread"] }

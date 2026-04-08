@@ -1,12 +1,14 @@
 [project]
 name = "lance-cuvs"
-version = "5.0.0b2"
+version = "0.1.0"
 description = "cuVS-backed vector index build backend for Lance"
 authors = [{ name = "Lance Devs", email = "dev@lance.org" }]
 license = { text = "Apache-2.0" }
 readme = "README.md"
-requires-python = ">=3.9"
-dependencies = ["numpy>=1.22", "pylance>=5.0.0b2"]
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=1.22",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "License :: OSI Approved :: Apache Software License",

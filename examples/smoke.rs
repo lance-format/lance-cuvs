@@ -11,7 +11,7 @@ use arrow_schema::{DataType, Field, FieldRef, Schema};
 use lance::Dataset;
 use lance::dataset::{WriteMode, WriteParams};
 use lance_arrow::FixedSizeListArrayExt;
-use lance_cuvs::{IvfPqBuildParams, VectorIndexBuildParams, VectorIndexKind, build_vector_index};
+use lance_cuvs::{assign_ivf_pq_to_artifact, train_ivf_pq};
 use lance_linalg::distance::DistanceType;
 
 fn unique_path(prefix: &str) -> PathBuf {
@@ -60,32 +60,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
     .await?;
 
     let dataset = Dataset::open(dataset_uri.to_str().expect("dataset uri utf8")).await?;
-    let output = build_vector_index(
+    let training =
+        train_ivf_pq(&dataset, "vector", 8, DistanceType::L2, 4, 8, 20, 8, false).await?;
+    let files = assign_ivf_pq_to_artifact(
         &dataset,
-        VectorIndexBuildParams {
-            column: "vector".to_string(),
-            kind: VectorIndexKind::IvfPq(IvfPqBuildParams {
-                num_partitions: 8,
-                metric_type: DistanceType::L2,
-                num_sub_vectors: 4,
-                sample_rate: 8,
-                max_iters: 20,
-                num_bits: 8,
-            }),
-            artifact_uri: artifact_uri
-                .to_str()
-                .expect("artifact uri utf8")
-                .to_string(),
-            batch_size: 1024,
-            filter_nan: false,
-        },
+        "vector",
+        &training,
+        artifact_uri.to_str().expect("artifact uri utf8"),
+        1024,
+        false,
     )
     .await?;
 
-    println!("artifact_uri={}", output.artifact_uri());
-    println!("files={}", output.files().len());
-    println!("ivf_centroids={}", output.ivf_centroids().len());
-    println!("pq_codebook={}", output.pq_codebook().len());
+    println!("artifact_uri={}", artifact_uri.display());
+    println!("files={}", files.len());
+    println!("ivf_centroids={}", training.ivf_centroids().len());
+    println!("pq_codebook={}", training.pq_codebook().len());
 
     Ok(())
 }

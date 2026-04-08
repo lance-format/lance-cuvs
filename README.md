@@ -2,11 +2,12 @@
 
 Experimental cuVS-backed vector build backend for Lance.
 
-This repository is being split out from the main Lance tree. The current implementation still targets Lance's partition-local artifact build path and depends on Lance crates via local path dependencies.
+This package targets Lance's partition-local artifact build path and currently depends on Lance git versions that include unreleased build APIs.
+Use Python 3.12+ so the installed RAPIDS wheels match the `cuvs-sys` 26.2.0 toolchain.
 
 It can also be installed as a Python package with `maturin develop --release`, exposing:
 
+- `lance_cuvs.train_ivf_pq(...)`
 - `lance_cuvs.build_ivf_pq_artifact(...)`
-- `lance_cuvs.create_ivf_pq_index(...)`
 
-The current source build assumes a sibling `../lance` checkout is available.
+`lance-cuvs` is a backend API provider. It stops at training and partition-artifact build output, and does not finalize or register Lance indices on behalf of callers.
