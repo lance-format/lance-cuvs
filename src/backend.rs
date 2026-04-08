@@ -31,6 +31,10 @@ const PARTITION_ARTIFACT_METADATA_FILE_NAME: &str = "metadata.lance";
 const PARTITION_ARTIFACT_FILE_VERSION: &str = "2.2";
 const PIPELINE_SLOTS: usize = 2;
 
+/// A trained cuVS IVF_PQ model that can be reused for artifact builds.
+///
+/// The training outputs are exposed as Arrow arrays so callers can feed them
+/// directly back into Lance's index finalization APIs.
 pub struct TrainedIvfPqIndex {
     pub(crate) resources: Resources,
     pub(crate) index: CuvsIvfPqIndex,
@@ -44,31 +48,41 @@ pub struct TrainedIvfPqIndex {
 }
 
 impl TrainedIvfPqIndex {
+    /// Return IVF centroids as a fixed-size list Arrow array.
     pub fn ivf_centroids(&self) -> &FixedSizeListArray {
         &self.ivf_centroids
     }
 
+    /// Return the PQ codebook as a fixed-size list Arrow array.
     pub fn pq_codebook(&self) -> &FixedSizeListArray {
         &self.pq_codebook
     }
 
+    /// Return the number of trained IVF partitions.
     pub fn num_partitions(&self) -> usize {
         self.num_partitions
     }
 
+    /// Return the encoded PQ byte width, which equals the number of subvectors.
     pub fn pq_code_width(&self) -> usize {
         self.num_sub_vectors
     }
 
+    /// Return the distance metric used during training.
     pub fn metric_type(&self) -> DistanceType {
         self.metric_type
     }
 
+    /// Return the number of bits used per PQ code.
     pub fn num_bits(&self) -> usize {
         self.num_bits
     }
 }
 
+/// Parameters for a vector index build request handled by this crate.
+///
+/// The request describes only the backend-owned steps: training and artifact
+/// generation. Lance finalization happens outside this crate.
 #[derive(Clone)]
 pub struct VectorIndexBuildParams {
     pub column: String,
@@ -78,11 +92,14 @@ pub struct VectorIndexBuildParams {
     pub filter_nan: bool,
 }
 
+/// Supported vector index kinds for the current backend surface.
 #[derive(Clone)]
 pub enum VectorIndexKind {
+    /// Build an IVF_PQ artifact with cuVS.
     IvfPq(IvfPqBuildParams),
 }
 
+/// Build parameters for a cuVS IVF_PQ job.
 #[derive(Clone)]
 pub struct IvfPqBuildParams {
     pub num_partitions: usize,
@@ -93,29 +110,36 @@ pub struct IvfPqBuildParams {
     pub num_bits: usize,
 }
 
+/// Backend output that callers can pass to Lance finalization.
 pub enum VectorIndexBuildOutput {
+    /// A partition-local artifact plus the Arrow-native training outputs used
+    /// to build it.
     PartitionArtifact(PartitionArtifactBuildOutput),
 }
 
 impl VectorIndexBuildOutput {
+    /// Return the output artifact URI.
     pub fn artifact_uri(&self) -> &str {
         match self {
             Self::PartitionArtifact(output) => &output.artifact_uri,
         }
     }
 
+    /// Return the artifact file list relative to the artifact root.
     pub fn files(&self) -> &[String] {
         match self {
             Self::PartitionArtifact(output) => &output.files,
         }
     }
 
+    /// Return trained IVF centroids.
     pub fn ivf_centroids(&self) -> &FixedSizeListArray {
         match self {
             Self::PartitionArtifact(output) => &output.ivf_centroids,
         }
     }
 
+    /// Return the trained PQ codebook.
     pub fn pq_codebook(&self) -> &FixedSizeListArray {
         match self {
             Self::PartitionArtifact(output) => &output.pq_codebook,
@@ -123,6 +147,7 @@ impl VectorIndexBuildOutput {
     }
 }
 
+/// Result of building a partition-local artifact.
 pub struct PartitionArtifactBuildOutput {
     pub(crate) artifact_uri: String,
     pub(crate) files: Vec<String>,
@@ -130,7 +155,9 @@ pub struct PartitionArtifactBuildOutput {
     pub(crate) pq_codebook: FixedSizeListArray,
 }
 
+/// Minimal backend interface for vector build providers.
 pub trait VectorBuildBackend {
+    /// Execute a backend build request and return a Lance-consumable output.
     fn build<'a>(
         &'a self,
         dataset: &'a Dataset,
@@ -138,6 +165,7 @@ pub trait VectorBuildBackend {
     ) -> LocalBoxFuture<'a, Result<VectorIndexBuildOutput>>;
 }
 
+/// cuVS implementation of [`VectorBuildBackend`].
 pub struct CuvsVectorBuildBackend;
 
 impl VectorBuildBackend for CuvsVectorBuildBackend {
@@ -562,6 +590,39 @@ where
     Ok(())
 }
 
+/// Train an IVF_PQ model with cuVS and return Arrow-native training outputs.
+///
+/// This function performs only the backend-owned training step. The returned
+/// value can be reused across multiple artifact builds.
+///
+/// # Errors
+///
+/// Returns an error when the input column is missing, empty, incompatible with
+/// cuVS, or when CUDA/cuVS reports a build failure.
+///
+/// # Example
+///
+/// ```no_run
+/// # use lance::dataset::Dataset;
+/// # use lance_cuvs::train_ivf_pq;
+/// # use lance_linalg::distance::DistanceType;
+/// # async fn demo(dataset: &Dataset) -> lance_core::Result<()> {
+/// let training = train_ivf_pq(
+///     dataset,
+///     "vector",
+///     256,
+///     DistanceType::L2,
+///     16,
+///     256,
+///     50,
+///     8,
+///     true,
+/// )
+/// .await?;
+/// assert_eq!(training.num_partitions(), 256);
+/// # Ok(())
+/// # }
+/// ```
 pub async fn train_ivf_pq(
     dataset: &Dataset,
     column: &str,
@@ -675,6 +736,47 @@ pub async fn train_ivf_pq(
     })
 }
 
+/// Build a partition-local IVF_PQ artifact from a trained model.
+///
+/// The output artifact is intended to be consumed by Lance's
+/// `precomputed_partition_artifact_uri` finalization path.
+///
+/// # Errors
+///
+/// Returns an error when scanning, encoding, or writing the artifact fails.
+///
+/// # Example
+///
+/// ```no_run
+/// # use lance::dataset::Dataset;
+/// # use lance_cuvs::{assign_ivf_pq_to_artifact, train_ivf_pq};
+/// # use lance_linalg::distance::DistanceType;
+/// # async fn demo(dataset: &Dataset) -> lance_core::Result<()> {
+/// let training = train_ivf_pq(
+///     dataset,
+///     "vector",
+///     256,
+///     DistanceType::L2,
+///     16,
+///     256,
+///     50,
+///     8,
+///     true,
+/// )
+/// .await?;
+/// let files = assign_ivf_pq_to_artifact(
+///     dataset,
+///     "vector",
+///     &training,
+///     "/tmp/lance-cuvs-artifact",
+///     1024 * 128,
+///     true,
+/// )
+/// .await?;
+/// assert!(!files.is_empty());
+/// # Ok(())
+/// # }
+/// ```
 pub async fn assign_ivf_pq_to_artifact(
     dataset: &Dataset,
     column: &str,
@@ -710,6 +812,42 @@ pub async fn assign_ivf_pq_to_artifact(
     Ok(files)
 }
 
+/// Execute a full backend build request.
+///
+/// This convenience entrypoint wraps training and artifact construction behind
+/// [`VectorBuildBackend`]. It still stops before Lance finalization.
+///
+/// # Example
+///
+/// ```no_run
+/// # use lance::dataset::Dataset;
+/// # use lance_cuvs::{
+/// #     build_vector_index, IvfPqBuildParams, VectorIndexBuildParams, VectorIndexKind,
+/// # };
+/// # use lance_linalg::distance::DistanceType;
+/// # async fn demo(dataset: &Dataset) -> lance_core::Result<()> {
+/// let output = build_vector_index(
+///     dataset,
+///     VectorIndexBuildParams {
+///         column: "vector".to_string(),
+///         kind: VectorIndexKind::IvfPq(IvfPqBuildParams {
+///             num_partitions: 256,
+///             metric_type: DistanceType::L2,
+///             num_sub_vectors: 16,
+///             sample_rate: 256,
+///             max_iters: 50,
+///             num_bits: 8,
+///         }),
+///         artifact_uri: "/tmp/lance-cuvs-artifact".to_string(),
+///         batch_size: 1024 * 128,
+///         filter_nan: true,
+///     },
+/// )
+/// .await?;
+/// assert!(!output.files().is_empty());
+/// # Ok(())
+/// # }
+/// ```
 pub async fn build_vector_index(
     dataset: &Dataset,
     params: VectorIndexBuildParams,

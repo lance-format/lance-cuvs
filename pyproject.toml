@@ -3,7 +3,7 @@ name = "lance-cuvs"
 version = "0.1.0"
 description = "cuVS-backed vector index build backend for Lance"
 authors = [{ name = "Lance Devs", email = "dev@lance.org" }]
-license = { text = "Apache-2.0" }
+license = { file = "LICENSE" }
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = ["pyarrow>=14"]

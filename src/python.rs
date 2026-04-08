@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright The Lance Authors
 
+//! PyO3 bindings for the public Python package surface.
+
 use crate::backend::{TrainedIvfPqIndex, assign_ivf_pq_to_artifact, train_ivf_pq};
 use arrow_array::Array;
 use arrow_pyarrow::ToPyArrow;
@@ -15,6 +17,7 @@ use pyo3::types::PyModule;
     module = "lance_cuvs._native",
     unsendable
 )]
+/// Python wrapper around a trained cuVS IVF_PQ model.
 struct PyTrainedIvfPqIndex {
     inner: TrainedIvfPqIndex,
 }
@@ -22,21 +25,25 @@ struct PyTrainedIvfPqIndex {
 #[pymethods]
 impl PyTrainedIvfPqIndex {
     #[getter]
+    /// Number of trained IVF partitions.
     fn num_partitions(&self) -> usize {
         self.inner.num_partitions()
     }
 
     #[getter]
+    /// Number of PQ subvectors.
     fn num_sub_vectors(&self) -> usize {
         self.inner.num_sub_vectors
     }
 
     #[getter]
+    /// Number of bits per PQ code.
     fn num_bits(&self) -> usize {
         self.inner.num_bits()
     }
 
     #[getter]
+    /// Distance metric used during training.
     fn metric_type(&self) -> &'static str {
         match self.inner.metric_type() {
             DistanceType::L2 => "L2",
@@ -46,10 +53,12 @@ impl PyTrainedIvfPqIndex {
         }
     }
 
+    /// Return IVF centroids as a `pyarrow.FixedSizeListArray`.
     fn ivf_centroids<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         self.inner.ivf_centroids().to_data().to_pyarrow(py)
     }
 
+    /// Return the PQ codebook as a `pyarrow.FixedSizeListArray`.
     fn pq_codebook<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         self.inner.pq_codebook().to_data().to_pyarrow(py)
     }
@@ -60,6 +69,7 @@ impl PyTrainedIvfPqIndex {
     module = "lance_cuvs._native",
     unsendable
 )]
+/// Python wrapper around a partition-local artifact build result.
 struct PyPartitionArtifactBuildOutput {
     artifact_uri: String,
     files: Vec<String>,
@@ -68,11 +78,13 @@ struct PyPartitionArtifactBuildOutput {
 #[pymethods]
 impl PyPartitionArtifactBuildOutput {
     #[getter]
+    /// Root URI of the generated artifact.
     fn artifact_uri(&self) -> &str {
         &self.artifact_uri
     }
 
     #[getter]
+    /// Relative file names produced under the artifact root.
     fn files(&self) -> Vec<String> {
         self.files.clone()
     }
@@ -105,6 +117,7 @@ fn parse_distance_type(metric: &str) -> PyResult<DistanceType> {
     )
 )]
 #[pyo3(name = "train_ivf_pq")]
+/// Train an IVF_PQ model and return Arrow-native training outputs.
 fn train_ivf_pq_py(
     py: Python<'_>,
     dataset_uri: &str,
@@ -153,6 +166,7 @@ fn train_ivf_pq_py(
         filter_nan = true,
     )
 )]
+/// Encode a dataset into a partition-local IVF_PQ artifact.
 fn build_ivf_pq_artifact<'py>(
     py: Python<'py>,
     dataset_uri: &str,
