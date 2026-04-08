@@ -58,6 +58,24 @@ def discover_cuda_prefixes() -> list[Path]:
     return dedupe(candidates)
 
 
+def discover_cuda_include_roots(cuda_prefixes: list[Path]) -> list[Path]:
+    include_roots: list[Path] = []
+
+    for cuda_prefix in cuda_prefixes:
+        direct_include = cuda_prefix / "include"
+        if direct_include.is_dir():
+            include_roots.append(direct_include)
+
+        targets_root = cuda_prefix / "targets"
+        if not targets_root.is_dir():
+            continue
+        for candidate in targets_root.glob("*/include"):
+            if candidate.is_dir():
+                include_roots.append(candidate)
+
+    return dedupe(include_roots)
+
+
 def record_package_configs(
     root: Path, cmake_roots: list[Path], package_dirs: dict[str, Path]
 ) -> None:
@@ -81,9 +99,10 @@ def record_package_configs(
                     package_dirs.setdefault(package_key, config_file.parent)
 
 
-def discover_roots() -> tuple[list[Path], list[Path], dict[str, Path]]:
+def discover_roots() -> tuple[list[Path], list[Path], list[Path], dict[str, Path]]:
     cmake_roots: list[Path] = []
     library_roots: list[Path] = []
+    include_roots: list[Path] = []
     package_dirs: dict[str, Path] = {}
 
     for site_packages in site.getsitepackages():
@@ -109,14 +128,21 @@ def discover_roots() -> tuple[list[Path], list[Path], dict[str, Path]]:
             ):
                 library_roots.append(candidate)
 
-    for cuda_prefix in discover_cuda_prefixes():
+    cuda_prefixes = discover_cuda_prefixes()
+    include_roots.extend(discover_cuda_include_roots(cuda_prefixes))
+    for cuda_prefix in cuda_prefixes:
         record_package_configs(cuda_prefix, cmake_roots, package_dirs)
         for suffix in LIB_SUFFIXES:
             candidate = cuda_prefix / suffix
             if candidate.is_dir():
                 library_roots.append(candidate)
 
-    return dedupe(cmake_roots), dedupe(library_roots), package_dirs
+    return (
+        dedupe(cmake_roots),
+        dedupe(library_roots),
+        dedupe(include_roots),
+        package_dirs,
+    )
 
 
 def merge_paths(new_paths: list[Path], existing: str | None) -> str:
@@ -127,7 +153,7 @@ def merge_paths(new_paths: list[Path], existing: str | None) -> str:
 
 
 def build_env() -> dict[str, str]:
-    cmake_roots, library_roots, package_dirs = discover_roots()
+    cmake_roots, library_roots, include_roots, package_dirs = discover_roots()
     if not cmake_roots:
         raise RuntimeError(
             "Failed to locate RAPIDS package roots. "
@@ -148,6 +174,18 @@ def build_env() -> dict[str, str]:
         ),
         "LIBRARY_PATH": merge_paths(library_roots, os.environ.get("LIBRARY_PATH")),
     }
+    if include_roots:
+        include_path = merge_paths(include_roots, None)
+        env["CPATH"] = merge_paths(include_roots, os.environ.get("CPATH"))
+        env["C_INCLUDE_PATH"] = merge_paths(
+            include_roots, os.environ.get("C_INCLUDE_PATH")
+        )
+        env["CPLUS_INCLUDE_PATH"] = merge_paths(
+            include_roots, os.environ.get("CPLUS_INCLUDE_PATH")
+        )
+        env["BINDGEN_EXTRA_CLANG_ARGS"] = " ".join(
+            f"-I{path}" for path in include_path.split(":") if path
+        )
     for package_key, env_name in PACKAGE_DIR_VARS.items():
         package_dir = package_dirs.get(package_key)
         if package_dir is not None:
