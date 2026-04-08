@@ -12,8 +12,7 @@ env:
 
 jobs:
   gpu-smoke:
-    runs-on:
-      group: ubuntu-24.04-4x-gpu
+    runs-on: ubuntu-24.04-4x-gpu
 
     steps:
       - uses: actions/checkout@v4
