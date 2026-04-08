@@ -8,6 +8,8 @@ use arrow_array::{
     Array, FixedSizeListArray, Float32Array, ListArray, RecordBatch, UInt8Array, UInt32Array,
 };
 use arrow_buffer::{OffsetBuffer, ScalarBuffer};
+#[cfg(feature = "python")]
+use arrow_pyarrow::ToPyArrow;
 use arrow_schema::{DataType, Field, Schema as ArrowSchema};
 use cuvs::Resources;
 use futures::{FutureExt, TryStreamExt, future::LocalBoxFuture};
@@ -22,9 +24,7 @@ use lance_index::vector::utils::is_finite;
 use lance_index::vector::{PART_ID_COLUMN, PQ_CODE_COLUMN};
 use lance_linalg::distance::DistanceType;
 use log::warn;
-use ndarray::{Array2, Array3, ArrayView2};
-#[cfg(feature = "python")]
-use numpy::{PyArray2, PyArray3};
+use ndarray::{Array2, ArrayView2};
 #[cfg(feature = "python")]
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 #[cfg(feature = "python")]
@@ -131,18 +131,12 @@ impl PyTrainedIvfPqIndex {
         }
     }
 
-    fn ivf_centroids<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray2<f32>>> {
-        Ok(PyArray2::from_owned_array(
-            py,
-            fixed_size_list_to_array2(self.inner.ivf_centroids())?,
-        ))
+    fn ivf_centroids<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.inner.ivf_centroids().to_data().to_pyarrow(py)
     }
 
-    fn pq_codebook<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyArray3<f32>>> {
-        Ok(PyArray3::from_owned_array(
-            py,
-            fixed_size_list_to_array3(self.inner.pq_codebook(), self.inner.num_sub_vectors)?,
-        ))
+    fn pq_codebook<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        self.inner.pq_codebook().to_data().to_pyarrow(py)
     }
 }
 
@@ -1447,50 +1441,6 @@ fn parse_distance_type(metric: &str) -> PyResult<DistanceType> {
             "unsupported metric_type for cuVS IVF_PQ: {other}"
         ))),
     }
-}
-
-#[cfg(feature = "python")]
-fn fixed_size_list_to_array2(array: &FixedSizeListArray) -> PyResult<Array2<f32>> {
-    let dim = array.value_length() as usize;
-    let values = array.values().as_primitive::<Float32Type>();
-    Array2::from_shape_vec((array.len(), dim), values.values().to_vec()).map_err(|error| {
-        PyRuntimeError::new_err(format!(
-            "failed to reshape IVF centroids into ndarray: {error}"
-        ))
-    })
-}
-
-#[cfg(feature = "python")]
-fn fixed_size_list_to_array3(
-    array: &FixedSizeListArray,
-    num_sub_vectors: usize,
-) -> PyResult<Array3<f32>> {
-    if num_sub_vectors == 0 {
-        return Err(PyValueError::new_err(
-            "num_sub_vectors must be greater than 0",
-        ));
-    }
-
-    if array.len() % num_sub_vectors != 0 {
-        return Err(PyRuntimeError::new_err(format!(
-            "PQ codebook rows {} are not divisible by num_sub_vectors {}",
-            array.len(),
-            num_sub_vectors
-        )));
-    }
-
-    let pq_book_size = array.len() / num_sub_vectors;
-    let subvector_dim = array.value_length() as usize;
-    let values = array.values().as_primitive::<Float32Type>();
-    Array3::from_shape_vec(
-        (num_sub_vectors, pq_book_size, subvector_dim),
-        values.values().to_vec(),
-    )
-    .map_err(|error| {
-        PyRuntimeError::new_err(format!(
-            "failed to reshape PQ codebook into ndarray: {error}"
-        ))
-    })
 }
 
 #[cfg(feature = "python")]

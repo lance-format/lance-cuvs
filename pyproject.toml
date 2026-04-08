@@ -6,9 +6,7 @@ authors = [{ name = "Lance Devs", email = "dev@lance.org" }]
 license = { text = "Apache-2.0" }
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = [
-    "numpy>=1.22",
-]
+dependencies = ["pyarrow>=14"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "License :: OSI Approved :: Apache Software License",

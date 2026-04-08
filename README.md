@@ -10,4 +10,6 @@ It can also be installed as a Python package with `maturin develop --release`, e
 - `lance_cuvs.train_ivf_pq(...)`
 - `lance_cuvs.build_ivf_pq_artifact(...)`
 
+`train_ivf_pq(...)` returns Arrow-native training outputs for IVF centroids and PQ codebook.
+
 `lance-cuvs` is a backend API provider. It stops at training and partition-artifact build output, and does not finalize or register Lance indices on behalf of callers.
