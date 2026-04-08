@@ -27,7 +27,8 @@ jobs:
             curl \
             git \
             libssl-dev \
-            pkg-config
+            pkg-config \
+            protobuf-compiler
 
       - uses: dtolnay/rust-toolchain@stable
 
