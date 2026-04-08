@@ -907,19 +907,16 @@ pub async fn assign_ivf_pq_to_artifact(
             .await
     });
 
-    let produce_result = for_each_transformed_batch(
-        dataset,
-        column,
-        trained,
-        batch_size,
-        filter_nan,
-        |batch| async {
-            tx.send(Ok(batch))
-                .await
-                .map_err(|error| Error::io(format!("failed to forward transformed batch: {error}")))
-        },
-    )
-    .await;
+    let produce_result =
+        for_each_transformed_batch(dataset, column, trained, batch_size, filter_nan, |batch| {
+            let mut tx = tx.clone();
+            async move {
+                tx.send(Ok(batch)).await.map_err(|error| {
+                    Error::io(format!("failed to forward transformed batch: {error}"))
+                })
+            }
+        })
+        .await;
     drop(tx);
 
     produce_result?;
