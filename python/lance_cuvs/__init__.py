@@ -202,8 +202,9 @@ def build_ivf_pq_artifact(
     training:
         A training result previously returned by :func:`train_ivf_pq`.
     artifact_uri:
-        Destination directory for the partition-local artifact. A temporary
-        directory is created when omitted.
+        Destination directory for the partition-local artifact. This must
+        resolve to the local filesystem. A temporary directory is created when
+        omitted.
     batch_size:
         Number of rows per transform batch.
     filter_nan:

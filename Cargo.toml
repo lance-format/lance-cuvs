@@ -26,7 +26,7 @@ cuvs = "26.2.0"
 cuvs-sys = "26.2.0"
 futures = "0.3"
 half = { version = "2.5", default-features = false, features = ["num-traits", "std"] }
-# This crate depends on unreleased Lance artifact-build APIs. Keep the Rust-side
+# This crate depends on unreleased Lance vector-build APIs. Keep the Rust-side
 # Lance dependencies pinned until those APIs stabilize.
 lance = { git = "https://github.com/lance-format/lance.git", rev = "6112a34bfe38618f07c099217dc3d89fd39ca6bb" }
 lance-arrow = { git = "https://github.com/lance-format/lance.git", rev = "6112a34bfe38618f07c099217dc3d89fd39ca6bb" }

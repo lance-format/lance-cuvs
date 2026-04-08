@@ -18,7 +18,7 @@ This project is licensed under the Apache License 2.0. See [LICENSE](LICENSE).
 
 - Current package version: `0.1.0`
 - Current backend scope: `IVF_PQ`
-- Current dependency baseline: Lance git versions that expose unreleased partition-artifact build APIs
+- Current dependency baseline: Lance git versions that expose unreleased vector-build APIs
 
 ## Installation
 
@@ -55,6 +55,7 @@ The returned `IvfPqTrainingOutput` exposes:
 ### `lance_cuvs.build_ivf_pq_artifact(...)`
 
 Encode a dataset with a previously trained model and materialize a partition-local artifact.
+The artifact destination must resolve to the local filesystem.
 
 The returned `IvfPqArtifactOutput` exposes:
 
