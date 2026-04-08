@@ -49,19 +49,23 @@ Keep that boundary intact. Do not reintroduce `pylance` convenience wrappers or 
 ### Local formatting
 
 ```bash
-cargo fmt --all
+UV_EXTRA_INDEX_URL=https://pypi.nvidia.com uv sync --group dev --no-install-project
+uv run cargo fmt --all
 ```
 
 ### Python syntax check
 
 ```bash
-python3 -m py_compile python/lance_cuvs/__init__.py
+UV_EXTRA_INDEX_URL=https://pypi.nvidia.com uv sync --group dev --no-install-project
+uv run python -m py_compile python/lance_cuvs/__init__.py
 ```
 
 ### Python package build
 
 ```bash
-maturin develop --release
+UV_EXTRA_INDEX_URL=https://pypi.nvidia.com uv sync --group dev --no-install-project
+eval "$(uv run python tools/rapids_env.py --format shell)"
+uv run maturin develop --release
 ```
 
 ### Smoke expectation
@@ -71,7 +75,7 @@ The minimal smoke should verify:
 1. `train_ivf_pq(...)` succeeds.
 2. Training outputs are Arrow arrays.
 3. `build_ivf_pq_artifact(...)` succeeds.
-4. A caller can pass the outputs back to Lance finalization.
+4. The returned artifact files are materialized on disk.
 
 ## CUDA / RAPIDS Notes
 

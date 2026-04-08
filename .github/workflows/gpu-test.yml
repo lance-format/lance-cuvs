@@ -1,0 +1,71 @@
+name: GPU Test
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
+
+env:
+  UV_EXTRA_INDEX_URL: https://pypi.nvidia.com
+
+jobs:
+  gpu-smoke:
+    runs-on:
+      group: ubuntu-24.04-4x-gpu
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify GPU runner
+        run: |
+          if ! command -v nvidia-smi >/dev/null 2>&1; then
+            echo "This workflow requires a GPU-capable runner with nvidia-smi available." >&2
+            exit 1
+          fi
+          nvidia-smi
+
+      - name: Verify CUDA toolkit
+        run: |
+          if ! command -v nvcc >/dev/null 2>&1; then
+            echo "This workflow expects the runner image to provide the CUDA toolkit." >&2
+            exit 1
+          fi
+          nvcc --version
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential \
+            clang \
+            curl \
+            git \
+            libssl-dev \
+            pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install Python 3.12
+        run: uv python install 3.12
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Sync development environment
+        run: uv sync --group dev --no-install-project
+
+      - name: Export RAPIDS build paths
+        run: uv run python tools/rapids_env.py --format github-env >> "$GITHUB_ENV"
+
+      - name: Build extension in-place
+        run: uv run maturin develop --release
+
+      - name: Run Python smoke test
+        env:
+          LANCE_CUVS_REQUIRE_GPU: "1"
+        run: uv run pytest -q tests/test_smoke.py

@@ -24,17 +24,18 @@ This project is licensed under the Apache License 2.0. See [LICENSE](LICENSE).
 
 Use Python `3.12+` so the installed RAPIDS wheels match the `cuvs-sys` `26.2.0` toolchain.
 
-Build the package locally with:
+Create a local development environment with `uv`:
 
 ```bash
-maturin develop --release
+UV_EXTRA_INDEX_URL=https://pypi.nvidia.com uv sync --group dev --no-install-project
+eval "$(uv run python tools/rapids_env.py --format shell)"
+uv run maturin develop --release
 ```
 
 You will also need:
 
 - CUDA toolkit
 - cuVS / RAPIDS Python wheels installed in the active environment
-- a Lance build that understands `precomputed_partition_artifact_uri`
 
 ## Public Python API
 
@@ -79,18 +80,35 @@ artifact = lance_cuvs.build_ivf_pq_artifact(
     training=training,
     artifact_uri="/tmp/example-artifact",
 )
+```
 
-ds = lance.dataset("/data/example.lance")
-ds.create_index(
-    "vector",
-    index_type="IVF_PQ",
-    metric="l2",
-    num_partitions=training.num_partitions,
-    num_sub_vectors=training.num_sub_vectors,
-    ivf_centroids=training.ivf_centroids(),
-    pq_codebook=training.pq_codebook(),
-    precomputed_partition_artifact_uri=artifact.artifact_uri,
-)
+Lance finalization stays outside this package. `lance-cuvs` only returns the
+Arrow-native training outputs and the partition-local artifact needed by the
+caller-managed finalize step.
+
+## Development
+
+Format the Rust sources with:
+
+```bash
+UV_EXTRA_INDEX_URL=https://pypi.nvidia.com uv sync --group dev --no-install-project
+uv run cargo fmt --all
+```
+
+Check the Python package surface with:
+
+```bash
+UV_EXTRA_INDEX_URL=https://pypi.nvidia.com uv sync --group dev --no-install-project
+uv run python -m py_compile python/lance_cuvs/__init__.py
+```
+
+Run the Python smoke on a GPU-capable machine with:
+
+```bash
+UV_EXTRA_INDEX_URL=https://pypi.nvidia.com uv sync --group dev --no-install-project
+eval "$(uv run python tools/rapids_env.py --format shell)"
+uv run maturin develop --release
+uv run pytest -q tests/test_smoke.py
 ```
 
 ## Rust Layout

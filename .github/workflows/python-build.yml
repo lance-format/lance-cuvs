@@ -1,0 +1,58 @@
+name: Python Build
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+env:
+  UV_EXTRA_INDEX_URL: https://pypi.nvidia.com
+
+jobs:
+  python-build:
+    runs-on: ubuntu-24.04
+    container:
+      image: nvidia/cuda:12.9.1-devel-ubuntu24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential \
+            clang \
+            curl \
+            git \
+            libssl-dev \
+            pkg-config
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install Python 3.12
+        run: uv python install 3.12
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Sync development environment
+        run: uv sync --group dev --no-install-project
+
+      - name: Export RAPIDS build paths
+        run: uv run python tools/rapids_env.py --format github-env >> "$GITHUB_ENV"
+
+      - name: Check Python package syntax
+        run: uv run python -m py_compile python/lance_cuvs/__init__.py
+
+      - name: Build wheel
+        run: uv run maturin build --release --out dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-dist
+          path: dist/*

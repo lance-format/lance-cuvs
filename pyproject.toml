@@ -18,7 +18,20 @@ classifiers = [
 requires = ["maturin>=1.4,<2"]
 build-backend = "maturin"
 
+[dependency-groups]
+dev = [
+    "cmake>=3.30.4",
+    "libcuvs-cu12==26.2.0",
+    "maturin>=1.4,<2",
+    "pyarrow>=14",
+    "pylance",
+    "pytest>=8",
+]
+
 [tool.maturin]
 python-source = "python"
 module-name = "lance_cuvs._native"
 features = ["python"]
+
+[tool.pytest.ini_options]
+markers = ["gpu: tests that require a CUDA-capable GPU"]
