@@ -35,6 +35,8 @@ jobs:
             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
               cuda-toolkit-12-9
           fi
+          export CUDA_HOME=/usr/local/cuda-12.9
+          export PATH="$CUDA_HOME/bin:$PATH"
           echo "/usr/local/cuda-12.9/bin" >> "$GITHUB_PATH"
           echo "CUDA_HOME=/usr/local/cuda-12.9" >> "$GITHUB_ENV"
           nvcc --version
