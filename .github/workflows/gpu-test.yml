@@ -70,7 +70,10 @@ jobs:
         run: uv sync --group dev --no-install-project
 
       - name: Export RAPIDS build paths
-        run: .venv/bin/python tools/rapids_env.py --format github-env >> "$GITHUB_ENV"
+        run: |
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+          echo "CMAKE=$PWD/.venv/bin/cmake" >> "$GITHUB_ENV"
+          .venv/bin/python tools/rapids_env.py --format github-env >> "$GITHUB_ENV"
 
       - name: Build extension in-place
         run: .venv/bin/maturin develop --release
