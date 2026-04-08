@@ -24,6 +24,7 @@ jobs:
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             build-essential \
             clang \
+            cmake \
             curl \
             git \
             libprotobuf-dev \
