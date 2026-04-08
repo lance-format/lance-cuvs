@@ -14,6 +14,7 @@ LIB_SUFFIXES = ("lib64", "lib")
 TOKEN_HINTS = ("cuvs", "raft", "rmm", "rapids")
 PACKAGE_DIR_VARS = {
     "cuvs": "cuvs_DIR",
+    "nvtx3": "nvtx3_DIR",
     "raft": "raft_DIR",
     "rmm": "rmm_DIR",
     "rapids_logger": "rapids_logger_DIR",
@@ -33,8 +34,55 @@ def dedupe(paths: list[Path]) -> list[Path]:
     return unique
 
 
+def discover_cuda_prefixes() -> list[Path]:
+    candidates: list[Path] = []
+
+    for env_name in ("CUDA_HOME", "CUDA_PATH"):
+        value = os.environ.get(env_name)
+        if not value:
+            continue
+        candidate = Path(value)
+        if candidate.is_dir():
+            candidates.append(candidate)
+
+    default_cuda = Path("/usr/local/cuda")
+    if default_cuda.is_dir():
+        candidates.append(default_cuda)
+
+    usr_local = Path("/usr/local")
+    if usr_local.is_dir():
+        for candidate in usr_local.glob("cuda-*"):
+            if candidate.is_dir():
+                candidates.append(candidate)
+
+    return dedupe(candidates)
+
+
+def record_package_configs(
+    root: Path, cmake_roots: list[Path], package_dirs: dict[str, Path]
+) -> None:
+    cmake_roots.append(root)
+    for suffix in LIB_SUFFIXES:
+        candidate = root / suffix
+        if not candidate.is_dir():
+            continue
+        cmake_roots.append(candidate)
+        for pattern in CONFIG_PATTERNS:
+            for config_file in candidate.rglob(pattern):
+                config_name = config_file.stem
+                if config_name.endswith("-config"):
+                    package_key = config_name[: -len("-config")]
+                elif config_name.endswith("Config"):
+                    package_key = config_name[: -len("Config")]
+                else:
+                    package_key = config_name
+                package_key = package_key.lower()
+                if package_key in PACKAGE_DIR_VARS:
+                    package_dirs.setdefault(package_key, config_file.parent)
+
+
 def discover_roots() -> tuple[list[Path], list[Path], dict[str, Path]]:
-    package_roots: list[Path] = []
+    cmake_roots: list[Path] = []
     library_roots: list[Path] = []
     package_dirs: dict[str, Path] = {}
 
@@ -47,23 +95,11 @@ def discover_roots() -> tuple[list[Path], list[Path], dict[str, Path]]:
             package_root = site_root / package_name
             if not package_root.is_dir():
                 continue
-            package_roots.append(package_root)
+            record_package_configs(package_root, cmake_roots, package_dirs)
             for suffix in LIB_SUFFIXES:
                 candidate = package_root / suffix
                 if candidate.is_dir():
                     library_roots.append(candidate)
-                    for pattern in CONFIG_PATTERNS:
-                        for config_file in candidate.rglob(pattern):
-                            config_name = config_file.stem
-                            if config_name.endswith("-config"):
-                                package_key = config_name[: -len("-config")]
-                            elif config_name.endswith("Config"):
-                                package_key = config_name[: -len("Config")]
-                            else:
-                                package_key = config_name
-                            package_key = package_key.lower()
-                            if package_key in PACKAGE_DIR_VARS:
-                                package_dirs.setdefault(package_key, config_file.parent)
 
         for candidate in site_root.iterdir():
             if (
@@ -73,7 +109,14 @@ def discover_roots() -> tuple[list[Path], list[Path], dict[str, Path]]:
             ):
                 library_roots.append(candidate)
 
-    return dedupe(package_roots), dedupe(library_roots), package_dirs
+    for cuda_prefix in discover_cuda_prefixes():
+        record_package_configs(cuda_prefix, cmake_roots, package_dirs)
+        for suffix in LIB_SUFFIXES:
+            candidate = cuda_prefix / suffix
+            if candidate.is_dir():
+                library_roots.append(candidate)
+
+    return dedupe(cmake_roots), dedupe(library_roots), package_dirs
 
 
 def merge_paths(new_paths: list[Path], existing: str | None) -> str:
@@ -84,8 +127,8 @@ def merge_paths(new_paths: list[Path], existing: str | None) -> str:
 
 
 def build_env() -> dict[str, str]:
-    package_roots, library_roots, package_dirs = discover_roots()
-    if not package_roots:
+    cmake_roots, library_roots, package_dirs = discover_roots()
+    if not cmake_roots:
         raise RuntimeError(
             "Failed to locate RAPIDS package roots. "
             "Install the development dependencies first, for example with "
@@ -98,7 +141,7 @@ def build_env() -> dict[str, str]:
 
     env = {
         "CMAKE_PREFIX_PATH": merge_paths(
-            package_roots, os.environ.get("CMAKE_PREFIX_PATH")
+            cmake_roots, os.environ.get("CMAKE_PREFIX_PATH")
         ),
         "LD_LIBRARY_PATH": merge_paths(
             library_roots, os.environ.get("LD_LIBRARY_PATH")
