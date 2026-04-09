@@ -79,6 +79,7 @@ docker "${DOCKER_ARGS[@]}" \
       cmake \
       curl \
       git \
+      just \
       libprotobuf-dev \
       libssl-dev \
       patchelf \

@@ -50,6 +50,7 @@ jobs:
             cmake \
             curl \
             git \
+            just \
             libprotobuf-dev \
             libssl-dev \
             pkg-config \
@@ -69,4 +70,4 @@ jobs:
       - name: Run GPU smoke
         env:
           LANCE_CUVS_REQUIRE_GPU: "1"
-        run: tools/ci_gpu_smoke.sh
+        run: just gpu-smoke

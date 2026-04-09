@@ -57,10 +57,16 @@ Keep that boundary intact. Do not reintroduce `pylance` convenience wrappers or 
 
 ## Build and Test
 
+### Task runner
+
+```bash
+just
+```
+
 ### Shared development container
 
 ```bash
-tools/run_in_container.sh -- bash
+just container-shell
 ```
 
 Add `--platform linux/amd64` only when you specifically need to mirror GitHub-hosted runner architecture.
@@ -68,34 +74,34 @@ Add `--platform linux/amd64` only when you specifically need to mirror GitHub-ho
 ### Root development environment
 
 ```bash
-UV_EXTRA_INDEX_URL=https://pypi.nvidia.com uv sync --group dev
+just sync-dev
 ```
 
 ### Loader tests
 
 ```bash
-uv run pytest -q tests/test_loader.py
+just loader-test
 ```
 
 ### Root package build
 
 ```bash
-uv build
+just python-build
 ```
 
 ### Backend package build
 
 ```bash
-eval "$(uv run python tools/rapids_env.py --format shell)"
-uv run --directory backends/cuvs_26_02 maturin develop --release --locked
+just backend-wheel
+just backend-develop
 ```
 
 ### CI-equivalent container validation
 
 ```bash
-tools/run_in_container.sh -- tools/ci_python_build.sh
-tools/run_in_container.sh -- tools/ci_rust_build.sh
-tools/run_in_container.sh -- tools/ci_python_release.sh
+just container-python-build
+just container-rust-build
+just container-python-release
 ```
 
 ### Smoke expectation
@@ -110,7 +116,7 @@ The minimal smoke should verify:
 ### GPU smoke in container
 
 ```bash
-tools/run_in_container.sh --gpu -- tools/ci_gpu_smoke.sh
+just container-gpu-smoke
 ```
 
 ## CUDA / RAPIDS Notes

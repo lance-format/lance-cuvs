@@ -27,6 +27,7 @@ jobs:
             cmake \
             curl \
             git \
+            just \
             libprotobuf-dev \
             libssl-dev \
             patchelf \
@@ -45,7 +46,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build Python distributions
-        run: tools/ci_python_release.sh
+        run: just python-release
 
       - uses: actions/upload-artifact@v4
         with:

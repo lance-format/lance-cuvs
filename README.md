@@ -99,10 +99,16 @@ caller-managed finalize step.
 
 ## Development
 
+List available tasks with:
+
+```bash
+just
+```
+
 Run commands inside the shared development container with:
 
 ```bash
-tools/run_in_container.sh -- bash
+just container-shell
 ```
 
 Use `--platform linux/amd64` only when you explicitly want to match the GitHub-hosted runner architecture:
@@ -114,57 +120,61 @@ tools/run_in_container.sh --platform linux/amd64 -- bash
 Run the CI-equivalent CPU build locally with:
 
 ```bash
-tools/run_in_container.sh -- tools/ci_python_build.sh
+just container-python-build
 ```
 
 Run the Rust-only build locally with:
 
 ```bash
-tools/run_in_container.sh -- tools/ci_rust_build.sh
+just container-rust-build
 ```
 
 Build all release artifacts locally with:
 
 ```bash
-tools/run_in_container.sh -- tools/ci_python_release.sh
+just container-python-release
 ```
 
 Create the root development environment with:
 
 ```bash
-UV_EXTRA_INDEX_URL=https://pypi.nvidia.com uv sync --group dev
+just sync-dev
 ```
 
 Run loader-only tests with:
 
 ```bash
-uv run pytest -q tests/test_loader.py
+just loader-test
 ```
 
 Build the root wheel with:
 
 ```bash
-uv build
+just python-build
+```
+
+Build the backend wheel with:
+
+```bash
+just backend-wheel
 ```
 
 Build the `cuvs-26-02` backend in-place with:
 
 ```bash
-eval "$(uv run python tools/rapids_env.py --format shell)"
-uv run --directory backends/cuvs_26_02 maturin develop --release --locked
+just backend-develop
 ```
 
-Build the `cuvs-26-02` backend wheel with:
+Build the release distributions with:
 
 ```bash
-eval "$(uv run python tools/rapids_env.py --format shell)"
-uv run --directory backends/cuvs_26_02 maturin build --release --locked --out ../../dist
+just python-release
 ```
 
 Run the Python smoke on a GPU-capable machine with:
 
 ```bash
-tools/run_in_container.sh --gpu -- tools/ci_gpu_smoke.sh
+just container-gpu-smoke
 ```
 
 ## Repository Layout
