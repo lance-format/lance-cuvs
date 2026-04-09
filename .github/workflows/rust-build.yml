@@ -47,6 +47,9 @@ jobs:
         run: uv python install 3.12
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            backends/cuvs_26_02 -> target
 
       - name: Run Rust build
         run: just rust-build
