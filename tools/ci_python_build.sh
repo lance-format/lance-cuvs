@@ -13,7 +13,7 @@ mkdir -p "$ROOT_DIR/dist"
 log_step "Check Python package syntax"
 (
   cd "$ROOT_DIR"
-  .venv/bin/python -m py_compile \
+  uv_project python -m py_compile \
     python/lance_cuvs/__init__.py \
     python/lance_cuvs/_loader.py \
     backends/cuvs_26_02/python/lance_cuvs_backend_cuvs_26_02/__init__.py
@@ -22,7 +22,7 @@ log_step "Check Python package syntax"
 log_step "Run loader tests"
 (
   cd "$ROOT_DIR"
-  .venv/bin/pytest -q tests/test_loader.py
+  uv_project pytest -q tests/test_loader.py
 )
 
 log_step "Build root wheel"
@@ -36,5 +36,5 @@ export_rapids_env
 log_step "Build backend wheel"
 (
   cd "$ROOT_DIR/backends/cuvs_26_02"
-  ../../.venv/bin/maturin build --release --locked --out ../../dist
+  uv_project maturin build --release --locked --out ../../dist
 )

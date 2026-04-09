@@ -26,11 +26,11 @@ log_step "Build root source distribution"
 log_step "Build backend wheel"
 (
   cd "$ROOT_DIR/backends/cuvs_26_02"
-  ../../.venv/bin/maturin build --release --locked --out ../../dist
+  uv_project maturin build --release --locked --out ../../dist
 )
 
 log_step "Build backend source distribution"
 (
   cd "$ROOT_DIR/backends/cuvs_26_02"
-  ../../.venv/bin/maturin sdist --out ../../dist
+  uv_project maturin sdist --out ../../dist
 )

@@ -18,24 +18,23 @@ sync_dev_env() {
   )
 }
 
-export_local_python() {
-  export PATH="$ROOT_DIR/.venv/bin:$PATH"
-  export CMAKE="$ROOT_DIR/.venv/bin/cmake"
+uv_project() {
+  uv run --project "$ROOT_DIR" --no-sync "$@"
 }
 
 export_rapids_env() {
   log_step "Export RAPIDS build environment"
-  export_local_python
+  export CMAKE
+  CMAKE="$(uv_project python -c 'import shutil; print(shutil.which("cmake") or "")')"
   local shell_env
-  shell_env="$("$ROOT_DIR/.venv/bin/python" "$ROOT_DIR/tools/rapids_env.py" --format shell)"
+  shell_env="$(uv_project python "$ROOT_DIR/tools/rapids_env.py" --format shell)"
   # shellcheck disable=SC1090
   source /dev/stdin <<<"$shell_env"
 }
 
 emit_github_env() {
-  export_local_python
   {
-    printf 'CMAKE=%s\n' "$ROOT_DIR/.venv/bin/cmake"
-    "$ROOT_DIR/.venv/bin/python" "$ROOT_DIR/tools/rapids_env.py" --format github-env
+    printf 'CMAKE=%s\n' "$(uv_project python -c 'import shutil; print(shutil.which("cmake") or "")')"
+    uv_project python "$ROOT_DIR/tools/rapids_env.py" --format github-env
   }
 }

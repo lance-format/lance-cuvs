@@ -10,12 +10,12 @@ export_rapids_env
 log_step "Build backend extension in place"
 (
   cd "$ROOT_DIR/backends/cuvs_26_02"
-  ../../.venv/bin/maturin develop --release --locked
+  uv_project maturin develop --release --locked
 )
 
 log_step "Run GPU smoke test"
 (
   cd "$ROOT_DIR"
   LANCE_CUVS_REQUIRE_GPU="${LANCE_CUVS_REQUIRE_GPU:-1}" \
-    .venv/bin/pytest -q tests/test_smoke.py
+    uv_project pytest -q tests/test_smoke.py
 )
