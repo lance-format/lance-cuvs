@@ -15,7 +15,7 @@ use std::collections::HashMap;
 
 #[pyclass(
     name = "IvfPqTrainingOutput",
-    module = "lance_cuvs_backend_cuvs_26_02._native",
+    module = "lance_cuvs_backend_cu12._native",
     unsendable
 )]
 /// Python wrapper around a trained cuVS IVF_PQ model.
@@ -67,7 +67,7 @@ impl PyTrainedIvfPqIndex {
 
 #[pyclass(
     name = "IvfPqArtifactOutput",
-    module = "lance_cuvs_backend_cuvs_26_02._native",
+    module = "lance_cuvs_backend_cu12._native",
     unsendable
 )]
 /// Python wrapper around a partition-local artifact build result.

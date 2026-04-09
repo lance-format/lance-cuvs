@@ -1,6 +1,7 @@
-# lance-cuvs
+# pylance-cuvs
 
-`lance-cuvs` provides cuVS-backed IVF_PQ training and artifact building for Lance datasets.
+`pylance-cuvs` provides cuVS-backed IVF_PQ training and artifact building for
+Lance datasets.
 
 It covers one narrow part of the indexing pipeline:
 
@@ -16,7 +17,7 @@ It does **not** create or register a Lance index on your behalf.
 - Python 3.12+
 - CUDA 12 runtime available on the machine
 - cuVS runtime `libcuvs-cu12==26.2.0`
-- A matching backend package: `lance-cuvs-backend-cuvs-26-02`
+- A matching backend package: `pylance-cuvs-cu12`
 - A Lance build that includes the vector-build APIs used by this project
 
 ## Installation
@@ -24,8 +25,8 @@ It does **not** create or register a Lance index on your behalf.
 Install the loader, the matching backend package, and the cuVS runtime into the
 same Python environment:
 
-- `lance-cuvs`
-- `lance-cuvs-backend-cuvs-26-02`
+- `pylance-cuvs`
+- `pylance-cuvs-cu12`
 - `libcuvs-cu12==26.2.0`
 
 If you are working from this repository, the shortest local setup is:
@@ -35,12 +36,14 @@ just sync-dev
 just backend-develop
 ```
 
-The loader chooses the backend from the installed cuVS runtime version. You can
+The loader chooses the backend from the installed cuVS runtime package. You can
 override detection when needed:
 
 ```bash
-export LANCE_CUVS_BACKEND=cuvs-26-02
+export LANCE_CUVS_BACKEND=cu12
 ```
+
+Legacy overrides such as `cuvs-26-02` are still accepted for compatibility.
 
 ## Quick Start
 
@@ -118,7 +121,7 @@ Key fields:
 
 ## Scope
 
-Use `lance-cuvs` when you want cuVS to do the expensive GPU-side training and
+Use `pylance-cuvs` when you want cuVS to do the expensive GPU-side training and
 encoding work, but you still want Lance to own index finalization.
 
 Do not expect this package to:
@@ -126,6 +129,100 @@ Do not expect this package to:
 - finalize an index
 - register an index in a dataset
 - provide a generic Lance wrapper beyond IVF_PQ training and artifact build
+
+## Development
+
+List available tasks with:
+
+```bash
+just
+```
+
+Run commands inside the shared development container with:
+
+```bash
+just container-shell
+```
+
+Use `--platform linux/amd64` only when you explicitly want to match the
+GitHub-hosted runner architecture:
+
+```bash
+tools/run_in_container.sh --platform linux/amd64 -- bash
+```
+
+Run the CI-equivalent CPU build locally with:
+
+```bash
+just container-python-build
+```
+
+Run the Rust-only build locally with:
+
+```bash
+just container-rust-build
+```
+
+Build all release artifacts locally with:
+
+```bash
+just container-python-release
+```
+
+Create the root development environment with:
+
+```bash
+just sync-dev
+```
+
+Run loader-only tests with:
+
+```bash
+just loader-test
+```
+
+Build the root wheel with:
+
+```bash
+just python-build
+```
+
+Build the backend wheel with:
+
+```bash
+just backend-wheel
+```
+
+Build the `cu12` backend in-place with:
+
+```bash
+just backend-develop
+```
+
+Build the release distributions with:
+
+```bash
+just python-release
+```
+
+Run the Python smoke on a GPU-capable machine with:
+
+```bash
+just container-gpu-smoke
+```
+
+## Repository Layout
+
+- `python/lance_cuvs`
+  - root loader package
+- `backends/cuvs_26_02`
+  - cuVS `26.02` source tree for the CUDA 12 backend package
+- `backends/cuvs_26_02/src/backend.rs`
+  - Lance-facing orchestration
+- `backends/cuvs_26_02/src/cuda.rs`
+  - CUDA / cuVS wrappers and tensor helpers
+- `backends/cuvs_26_02/src/python.rs`
+  - PyO3 bindings
 
 ## License
 

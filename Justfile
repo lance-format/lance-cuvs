@@ -31,7 +31,7 @@ python-build: sync-dev
   {{uv_project}} python -m py_compile \
     python/lance_cuvs/__init__.py \
     python/lance_cuvs/_loader.py \
-    backends/cuvs_26_02/python/lance_cuvs_backend_cuvs_26_02/__init__.py
+    backends/cuvs_26_02/python/lance_cuvs_backend_cu12/__init__.py
   {{uv_project}} pytest -q tests/test_loader.py
   uv build --wheel --out-dir dist
   {{rapids_env}} && cd backends/cuvs_26_02 && {{uv_project}} maturin build --release --locked --out ../../dist

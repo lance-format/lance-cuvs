@@ -2,7 +2,7 @@
 
 ## Scope
 
-`lance-cuvs` is a narrow backend loader project:
+`pylance-cuvs` is a narrow backend loader project:
 
 - It exposes a stable Python API for Lance's cuVS integration.
 - It selects a versioned native backend based on the installed cuVS runtime.
@@ -28,8 +28,8 @@ Keep that boundary intact. Do not reintroduce `pylance` convenience wrappers or 
 - `backends/cuvs_26_02/src/python.rs`
   - PyO3 bindings only.
   - No build logic beyond argument conversion and runtime bridging.
-- `backends/cuvs_26_02/python/lance_cuvs_backend_cuvs_26_02`
-  - Version-specific Python package surface for cuVS `26.02`.
+- `backends/cuvs_26_02/python/lance_cuvs_backend_cu12`
+  - CUDA 12 Python package surface for the cuVS `26.02` backend.
 
 ## API Rules
 
@@ -123,7 +123,7 @@ just container-gpu-smoke
 
 - Python `3.12` is the current expected baseline.
 - The root package detects cuVS runtime versions from installed Python package metadata.
-- The current supported backend key is `cuvs-26-02`.
+- The current supported backend key is `cu12`.
 - The build requires CUDA toolkit, cuVS wheel-provided CMake packages, and dynamic libraries to be discoverable.
 - When debugging builds, separate:
   - loader / backend selection problems

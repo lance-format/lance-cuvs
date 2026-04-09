@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright The Lance Authors
 
-//! cuVS 26.02 backend implementation for `lance-cuvs`.
+//! CUDA 12 backend implementation for `pylance-cuvs`.
 //!
 //! This backend crate is intentionally narrow:
 //! - it trains IVF_PQ models with cuVS,

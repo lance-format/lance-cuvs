@@ -38,7 +38,7 @@ def _require_gpu() -> None:
     if _has_visible_gpu():
         return
 
-    message = "lance-cuvs smoke test requires a CUDA-capable GPU"
+    message = "pylance-cuvs smoke test requires a CUDA-capable GPU"
     if os.environ.get("LANCE_CUVS_REQUIRE_GPU") == "1":
         pytest.fail(message)
     pytest.skip(message)

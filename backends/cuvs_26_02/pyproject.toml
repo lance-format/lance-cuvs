@@ -1,7 +1,7 @@
 [project]
-name = "lance-cuvs-backend-cuvs-26-02"
+name = "pylance-cuvs-cu12"
 version = "0.1.0"
-description = "cuVS 26.02 backend for lance-cuvs"
+description = "CUDA 12 runtime backend for pylance-cuvs"
 authors = [{ name = "Lance Devs", email = "dev@lance.org" }]
 license = { text = "Apache-2.0" }
 requires-python = ">=3.12"
@@ -19,5 +19,5 @@ build-backend = "maturin"
 
 [tool.maturin]
 python-source = "python"
-module-name = "lance_cuvs_backend_cuvs_26_02._native"
+module-name = "lance_cuvs_backend_cu12._native"
 features = ["python"]

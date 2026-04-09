@@ -1,5 +1,5 @@
 [project]
-name = "lance-cuvs"
+name = "pylance-cuvs"
 version = "0.1.0"
 description = "Version-dispatched cuVS backend loader for Lance"
 authors = [{ name = "Lance Devs", email = "dev@lance.org" }]
