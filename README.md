@@ -99,6 +99,30 @@ caller-managed finalize step.
 
 ## Development
 
+Run commands inside the shared development container with:
+
+```bash
+tools/run_in_container.sh -- bash
+```
+
+Run the CI-equivalent CPU build locally with:
+
+```bash
+tools/run_in_container.sh -- tools/ci_python_build.sh
+```
+
+Run the Rust-only build locally with:
+
+```bash
+tools/run_in_container.sh -- tools/ci_rust_build.sh
+```
+
+Build all release artifacts locally with:
+
+```bash
+tools/run_in_container.sh -- tools/ci_python_release.sh
+```
+
 Create the root development environment with:
 
 ```bash
@@ -134,10 +158,7 @@ uv run --directory backends/cuvs_26_02 maturin build --release --locked --out ..
 Run the Python smoke on a GPU-capable machine with:
 
 ```bash
-UV_EXTRA_INDEX_URL=https://pypi.nvidia.com uv sync --group dev
-eval "$(uv run python tools/rapids_env.py --format shell)"
-uv run --directory backends/cuvs_26_02 maturin develop --release --locked
-uv run pytest -q tests/test_smoke.py
+tools/run_in_container.sh --gpu -- tools/ci_gpu_smoke.sh
 ```
 
 ## Repository Layout

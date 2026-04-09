@@ -1,4 +1,6 @@
 target/
+dist/
+.venv/
 __pycache__/
 python/**/__pycache__/
 *.pyc

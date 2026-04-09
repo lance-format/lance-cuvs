@@ -43,14 +43,5 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Sync development environment
-        run: uv sync --group dev --no-install-project
-
-      - name: Export RAPIDS build paths
-        run: |
-          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
-          echo "CMAKE=$PWD/.venv/bin/cmake" >> "$GITHUB_ENV"
-          .venv/bin/python tools/rapids_env.py --format github-env >> "$GITHUB_ENV"
-
-      - name: Build Rust crate
-        run: cargo build --manifest-path backends/cuvs_26_02/Cargo.toml --locked --all-targets
+      - name: Run Rust build
+        run: tools/ci_rust_build.sh

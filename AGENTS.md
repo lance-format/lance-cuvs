@@ -57,6 +57,12 @@ Keep that boundary intact. Do not reintroduce `pylance` convenience wrappers or 
 
 ## Build and Test
 
+### Shared development container
+
+```bash
+tools/run_in_container.sh -- bash
+```
+
 ### Root development environment
 
 ```bash
@@ -82,6 +88,14 @@ eval "$(uv run python tools/rapids_env.py --format shell)"
 uv run --directory backends/cuvs_26_02 maturin develop --release --locked
 ```
 
+### CI-equivalent container validation
+
+```bash
+tools/run_in_container.sh -- tools/ci_python_build.sh
+tools/run_in_container.sh -- tools/ci_rust_build.sh
+tools/run_in_container.sh -- tools/ci_python_release.sh
+```
+
 ### Smoke expectation
 
 The minimal smoke should verify:
@@ -90,6 +104,12 @@ The minimal smoke should verify:
 2. Training outputs are Arrow arrays.
 3. `build_ivf_pq_artifact(...)` succeeds.
 4. The returned artifact files are materialized on disk.
+
+### GPU smoke in container
+
+```bash
+tools/run_in_container.sh --gpu -- tools/ci_gpu_smoke.sh
+```
 
 ## CUDA / RAPIDS Notes
 

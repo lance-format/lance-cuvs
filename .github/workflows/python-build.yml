@@ -44,31 +44,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Sync development environment
-        run: uv sync --group dev
-
-      - name: Check Python package syntax
-        run: |
-          .venv/bin/python -m py_compile \
-            python/lance_cuvs/__init__.py \
-            python/lance_cuvs/_loader.py \
-            backends/cuvs_26_02/python/lance_cuvs_backend_cuvs_26_02/__init__.py
-
-      - name: Run loader tests
-        run: .venv/bin/pytest -q tests/test_loader.py
-
-      - name: Build root wheel
-        run: uv build --wheel --out-dir dist
-
-      - name: Export RAPIDS build paths
-        run: |
-          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
-          echo "CMAKE=$PWD/.venv/bin/cmake" >> "$GITHUB_ENV"
-          .venv/bin/python tools/rapids_env.py --format github-env >> "$GITHUB_ENV"
-
-      - name: Build backend wheel
-        working-directory: backends/cuvs_26_02
-        run: ../../.venv/bin/maturin build --release --locked --out ../../dist
+      - name: Run Python build checks
+        run: tools/ci_python_build.sh
 
       - uses: actions/upload-artifact@v4
         with:
