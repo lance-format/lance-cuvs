@@ -54,7 +54,7 @@ jobs:
           .venv/bin/python tools/rapids_env.py --format github-env >> "$GITHUB_ENV"
 
       - name: Build wheel
-        run: .venv/bin/maturin build --release --out dist
+        run: .venv/bin/maturin build --release --locked --out dist
 
       - name: Build source distribution
         run: .venv/bin/maturin sdist --out dist

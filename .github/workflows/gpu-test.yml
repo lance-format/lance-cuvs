@@ -76,7 +76,7 @@ jobs:
           .venv/bin/python tools/rapids_env.py --format github-env >> "$GITHUB_ENV"
 
       - name: Build extension in-place
-        run: .venv/bin/maturin develop --release
+        run: .venv/bin/maturin develop --release --locked
 
       - name: Run Python smoke test
         env:
