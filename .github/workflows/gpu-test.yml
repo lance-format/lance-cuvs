@@ -67,7 +67,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Sync development environment
-        run: uv sync --group dev --no-install-project
+        run: uv sync --group dev
 
       - name: Export RAPIDS build paths
         run: |
@@ -76,7 +76,8 @@ jobs:
           .venv/bin/python tools/rapids_env.py --format github-env >> "$GITHUB_ENV"
 
       - name: Build extension in-place
-        run: .venv/bin/maturin develop --release --locked
+        working-directory: backends/cuvs_26_02
+        run: ../../.venv/bin/maturin develop --release --locked
 
       - name: Run Python smoke test
         env:

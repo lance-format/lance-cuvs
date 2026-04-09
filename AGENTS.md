@@ -2,8 +2,10 @@
 
 ## Scope
 
-`lance-cuvs` is a narrow backend package:
+`lance-cuvs` is a narrow backend loader project:
 
+- It exposes a stable Python API for Lance's cuVS integration.
+- It selects a versioned native backend based on the installed cuVS runtime.
 - It trains IVF_PQ models with cuVS.
 - It encodes a Lance dataset into a partition-local artifact.
 - It does **not** finalize or register Lance indices on behalf of callers.
@@ -12,19 +14,22 @@ Keep that boundary intact. Do not reintroduce `pylance` convenience wrappers or 
 
 ## Architecture
 
-- `src/backend.rs`
+- `python/lance_cuvs`
+  - Pure Python loader.
+  - cuVS runtime detection.
+  - Backend dispatch.
+- `backends/cuvs_26_02/src/backend.rs`
   - Lance-facing orchestration.
   - Public backend API types.
   - Training and artifact build entrypoints.
-- `src/cuda.rs`
+- `backends/cuvs_26_02/src/cuda.rs`
   - CUDA and cuVS low-level wrappers.
   - Device tensors, pinned host buffers, DLPack tensor views.
-- `src/python.rs`
+- `backends/cuvs_26_02/src/python.rs`
   - PyO3 bindings only.
   - No build logic beyond argument conversion and runtime bridging.
-- `python/lance_cuvs/__init__.py`
-  - Thin Python package surface.
-  - Shared library preloading and public docstring-facing wrappers.
+- `backends/cuvs_26_02/python/lance_cuvs_backend_cuvs_26_02`
+  - Version-specific Python package surface for cuVS `26.02`.
 
 ## API Rules
 
@@ -36,36 +41,45 @@ Keep that boundary intact. Do not reintroduce `pylance` convenience wrappers or 
 - Prefer stable, explicit outputs over convenience orchestration.
   - `train_ivf_pq(...)`
   - `build_ivf_pq_artifact(..., training=...)`
+- Keep the root package version-agnostic.
+  - No direct `cuvs-sys` dependency in the root package.
+  - No root `_native` extension module.
 
 ## Dependency Rules
 
-- This package currently depends on unreleased Lance build APIs.
+- The root package must stay pure Python.
+- Version-pinned cuVS bindings belong only in versioned backend packages.
+- The current backend baseline is `cuvs == 26.2.0`.
+- This project currently depends on unreleased Lance build APIs.
 - Use Lance git dependencies in source control.
 - For local or EC2 validation against an unmerged Lance checkout, patch dependencies to path-based Lance crates outside the committed tree.
 - Do not commit machine-specific path dependencies.
 
 ## Build and Test
 
-### Local formatting
+### Root development environment
 
 ```bash
-UV_EXTRA_INDEX_URL=https://pypi.nvidia.com uv sync --group dev --no-install-project
-uv run cargo fmt --all
+UV_EXTRA_INDEX_URL=https://pypi.nvidia.com uv sync --group dev
 ```
 
-### Python syntax check
+### Loader tests
 
 ```bash
-UV_EXTRA_INDEX_URL=https://pypi.nvidia.com uv sync --group dev --no-install-project
-uv run python -m py_compile python/lance_cuvs/__init__.py
+uv run pytest -q tests/test_loader.py
 ```
 
-### Python package build
+### Root package build
 
 ```bash
-UV_EXTRA_INDEX_URL=https://pypi.nvidia.com uv sync --group dev --no-install-project
+uv build
+```
+
+### Backend package build
+
+```bash
 eval "$(uv run python tools/rapids_env.py --format shell)"
-uv run maturin develop --release
+uv run --directory backends/cuvs_26_02 maturin develop --release --locked
 ```
 
 ### Smoke expectation
@@ -79,10 +93,13 @@ The minimal smoke should verify:
 
 ## CUDA / RAPIDS Notes
 
-- Python 3.12 is the current expected baseline for matching RAPIDS wheels.
+- Python `3.12` is the current expected baseline.
+- The root package detects cuVS runtime versions from installed Python package metadata.
+- The current supported backend key is `cuvs_26_02`.
 - The build requires CUDA toolkit, cuVS wheel-provided CMake packages, and dynamic libraries to be discoverable.
 - When debugging builds, separate:
-  - source/layout problems
+  - loader / backend selection problems
+  - backend source/layout problems
   - Lance dependency baseline problems
   - CUDA / linker environment problems
 

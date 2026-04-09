@@ -1,8 +1,19 @@
 # lance-cuvs
 
-`lance-cuvs` is an experimental cuVS-backed build backend for Lance vector indices.
+`lance-cuvs` is an experimental cuVS backend loader for Lance vector indices.
 
-The package is intentionally narrow:
+The repository is intentionally split into two layers:
+
+- `lance-cuvs`
+  - stable Python entrypoint
+  - cuVS runtime detection
+  - backend selection
+- `lance-cuvs-backend-cuvs_26_02`
+  - cuVS `26.02` native implementation
+  - IVF_PQ training
+  - partition-local artifact build
+
+The public API stays narrow:
 
 - train an `IVF_PQ` model with cuVS
 - encode a Lance dataset into a partition-local artifact
@@ -16,26 +27,25 @@ This project is licensed under the Apache License 2.0. See [LICENSE](LICENSE).
 
 ## Status
 
-- Current package version: `0.1.0`
-- Current backend scope: `IVF_PQ`
+- Current loader package version: `0.1.0`
+- Current backend package version: `0.1.0`
+- Current supported runtime backend: `cuvs_26_02`
 - Current dependency baseline: Lance git versions that expose unreleased vector-build APIs
 
 ## Installation
 
-Use Python `3.12+` so the installed RAPIDS wheels match the `cuvs-sys` `26.2.0` toolchain.
+The root package is only the loader. Install both the loader and a matching backend package.
 
-Create a local development environment with `uv`:
+Current supported backend:
+
+- `lance-cuvs-backend-cuvs_26_02`
+- `libcuvs-cu12==26.2.0`
+
+The loader selects the backend from the installed cuVS runtime version. You can override auto-detection with:
 
 ```bash
-UV_EXTRA_INDEX_URL=https://pypi.nvidia.com uv sync --group dev --no-install-project
-eval "$(uv run python tools/rapids_env.py --format shell)"
-uv run maturin develop --release
+export LANCE_CUVS_BACKEND=cuvs_26_02
 ```
-
-You will also need:
-
-- CUDA toolkit
-- cuVS / RAPIDS Python wheels installed in the active environment
 
 ## Public Python API
 
@@ -89,32 +99,56 @@ caller-managed finalize step.
 
 ## Development
 
-Format the Rust sources with:
+Create the root development environment with:
 
 ```bash
-UV_EXTRA_INDEX_URL=https://pypi.nvidia.com uv sync --group dev --no-install-project
-uv run cargo fmt --all
+UV_EXTRA_INDEX_URL=https://pypi.nvidia.com uv sync --group dev
 ```
 
-Check the Python package surface with:
+Run loader-only tests with:
 
 ```bash
-UV_EXTRA_INDEX_URL=https://pypi.nvidia.com uv sync --group dev --no-install-project
-uv run python -m py_compile python/lance_cuvs/__init__.py
+uv run pytest -q tests/test_loader.py
+```
+
+Build the root wheel with:
+
+```bash
+uv build
+```
+
+Build the `cuvs_26_02` backend in-place with:
+
+```bash
+eval "$(uv run python tools/rapids_env.py --format shell)"
+uv run --directory backends/cuvs_26_02 maturin develop --release --locked
+```
+
+Build the `cuvs_26_02` backend wheel with:
+
+```bash
+eval "$(uv run python tools/rapids_env.py --format shell)"
+uv run --directory backends/cuvs_26_02 maturin build --release --locked --out ../../dist
 ```
 
 Run the Python smoke on a GPU-capable machine with:
 
 ```bash
-UV_EXTRA_INDEX_URL=https://pypi.nvidia.com uv sync --group dev --no-install-project
+UV_EXTRA_INDEX_URL=https://pypi.nvidia.com uv sync --group dev
 eval "$(uv run python tools/rapids_env.py --format shell)"
-uv run maturin develop --release
+uv run --directory backends/cuvs_26_02 maturin develop --release --locked
 uv run pytest -q tests/test_smoke.py
 ```
 
-## Rust Layout
+## Repository Layout
 
-- `src/backend.rs`: public backend API and Lance-side orchestration
-- `src/cuda.rs`: CUDA / cuVS wrappers and tensor helpers
-- `src/python.rs`: PyO3 bindings
-- `python/lance_cuvs/__init__.py`: thin Python package surface
+- `python/lance_cuvs`
+  - root loader package
+- `backends/cuvs_26_02`
+  - cuVS `26.02` backend package
+- `backends/cuvs_26_02/src/backend.rs`
+  - Lance-facing orchestration
+- `backends/cuvs_26_02/src/cuda.rs`
+  - CUDA / cuVS wrappers and tensor helpers
+- `backends/cuvs_26_02/src/python.rs`
+  - PyO3 bindings
