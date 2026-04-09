@@ -6,6 +6,10 @@ on:
     branches:
       - main
 
+concurrency:
+  group: python-build-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 env:
   UV_EXTRA_INDEX_URL: https://pypi.nvidia.com
 
