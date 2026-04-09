@@ -29,6 +29,7 @@ jobs:
             git \
             libprotobuf-dev \
             libssl-dev \
+            patchelf \
             pkg-config \
             protobuf-compiler
 
