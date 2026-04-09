@@ -95,7 +95,7 @@ The minimal smoke should verify:
 
 - Python `3.12` is the current expected baseline.
 - The root package detects cuVS runtime versions from installed Python package metadata.
-- The current supported backend key is `cuvs_26_02`.
+- The current supported backend key is `cuvs-26-02`.
 - The build requires CUDA toolkit, cuVS wheel-provided CMake packages, and dynamic libraries to be discoverable.
 - When debugging builds, separate:
   - loader / backend selection problems

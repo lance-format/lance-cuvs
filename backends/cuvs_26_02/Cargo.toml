@@ -1,5 +1,5 @@
 [package]
-name = "lance-cuvs-backend-cuvs_26_02"
+name = "lance-cuvs-backend-cuvs-26-02"
 version = "0.1.0"
 edition = "2024"
 authors = ["Lance Devs <dev@lance.org>"]

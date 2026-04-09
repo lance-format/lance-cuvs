@@ -23,10 +23,10 @@ class BackendSpec:
 
 
 SUPPORTED_BACKENDS: dict[str, BackendSpec] = {
-    "cuvs_26_02": BackendSpec(
-        key="cuvs_26_02",
+    "cuvs-26-02": BackendSpec(
+        key="cuvs-26-02",
         module="lance_cuvs_backend_cuvs_26_02",
-        distribution="lance-cuvs-backend-cuvs_26_02",
+        distribution="lance-cuvs-backend-cuvs-26-02",
         runtime_major=26,
         runtime_minor=2,
     ),
@@ -148,7 +148,7 @@ def _normalize_backend_key(value: str) -> str:
 
     match = re.fullmatch(r"cuvs[_]?(\d+)[_.]?(\d+)", normalized)
     if match:
-        return f"cuvs_{int(match.group(1)):02d}_{int(match.group(2)):02d}"
+        return f"cuvs-{int(match.group(1)):02d}-{int(match.group(2)):02d}"
 
     if normalized in SUPPORTED_BACKENDS:
         return normalized
@@ -173,7 +173,7 @@ def backend_key_for_runtime(version: str) -> str:
     if match is None:
         raise ImportError(f"Unable to parse cuVS runtime version {version!r}")
 
-    key = f"cuvs_{int(match.group(1)):02d}_{int(match.group(2)):02d}"
+    key = f"cuvs-{int(match.group(1)):02d}-{int(match.group(2)):02d}"
     if key not in SUPPORTED_BACKENDS:
         supported = ", ".join(sorted(SUPPORTED_BACKENDS))
         raise ImportError(

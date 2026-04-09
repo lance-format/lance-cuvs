@@ -3342,7 +3342,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "lance-cuvs"
+name = "lance-cuvs-backend-cuvs-26-02"
 version = "0.1.0"
 dependencies = [
  "arrow",

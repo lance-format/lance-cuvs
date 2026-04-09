@@ -8,7 +8,7 @@ The repository is intentionally split into two layers:
   - stable Python entrypoint
   - cuVS runtime detection
   - backend selection
-- `lance-cuvs-backend-cuvs_26_02`
+- `lance-cuvs-backend-cuvs-26-02`
   - cuVS `26.02` native implementation
   - IVF_PQ training
   - partition-local artifact build
@@ -29,7 +29,7 @@ This project is licensed under the Apache License 2.0. See [LICENSE](LICENSE).
 
 - Current loader package version: `0.1.0`
 - Current backend package version: `0.1.0`
-- Current supported runtime backend: `cuvs_26_02`
+- Current supported runtime backend: `cuvs-26-02`
 - Current dependency baseline: Lance git versions that expose unreleased vector-build APIs
 
 ## Installation
@@ -38,13 +38,13 @@ The root package is only the loader. Install both the loader and a matching back
 
 Current supported backend:
 
-- `lance-cuvs-backend-cuvs_26_02`
+- `lance-cuvs-backend-cuvs-26-02`
 - `libcuvs-cu12==26.2.0`
 
 The loader selects the backend from the installed cuVS runtime version. You can override auto-detection with:
 
 ```bash
-export LANCE_CUVS_BACKEND=cuvs_26_02
+export LANCE_CUVS_BACKEND=cuvs-26-02
 ```
 
 ## Public Python API
@@ -117,14 +117,14 @@ Build the root wheel with:
 uv build
 ```
 
-Build the `cuvs_26_02` backend in-place with:
+Build the `cuvs-26-02` backend in-place with:
 
 ```bash
 eval "$(uv run python tools/rapids_env.py --format shell)"
 uv run --directory backends/cuvs_26_02 maturin develop --release --locked
 ```
 
-Build the `cuvs_26_02` backend wheel with:
+Build the `cuvs-26-02` backend wheel with:
 
 ```bash
 eval "$(uv run python tools/rapids_env.py --format shell)"

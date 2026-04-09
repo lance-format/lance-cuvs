@@ -11,14 +11,15 @@ from lance_cuvs import _loader
 
 
 def test_backend_key_for_runtime() -> None:
-    assert _loader.backend_key_for_runtime("26.2.0") == "cuvs_26_02"
+    assert _loader.backend_key_for_runtime("26.2.0") == "cuvs-26-02"
 
 
 def test_normalize_backend_override() -> None:
-    assert _loader._normalize_backend_key("cuvs_26_02") == "cuvs_26_02"
+    assert _loader._normalize_backend_key("cuvs-26-02") == "cuvs-26-02"
+    assert _loader._normalize_backend_key("cuvs_26_02") == "cuvs-26-02"
     assert (
-        _loader._normalize_backend_key("lance-cuvs-backend-cuvs_26_02")
-        == "cuvs_26_02"
+        _loader._normalize_backend_key("lance-cuvs-backend-cuvs-26-02")
+        == "cuvs-26-02"
     )
 
 
@@ -28,7 +29,7 @@ def test_resolve_backend_from_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
 
     spec = _loader.resolve_backend()
 
-    assert spec.key == "cuvs_26_02"
+    assert spec.key == "cuvs-26-02"
     assert spec.module == "lance_cuvs_backend_cuvs_26_02"
 
 
@@ -48,7 +49,7 @@ def test_load_backend_imports_selected_module(monkeypatch: pytest.MonkeyPatch) -
         train_ivf_pq=lambda *args, **kwargs: (args, kwargs),
     )
 
-    monkeypatch.setenv("LANCE_CUVS_BACKEND", "cuvs_26_02")
+    monkeypatch.setenv("LANCE_CUVS_BACKEND", "cuvs-26-02")
     monkeypatch.setattr(_loader, "_BACKEND", None)
     monkeypatch.setattr(_loader, "_preload_shared_libraries", lambda: None)
     monkeypatch.setattr(_loader.importlib, "import_module", lambda name: backend)
