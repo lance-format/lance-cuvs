@@ -1,0 +1,43 @@
+[package]
+name = "lance-cuvs-backend-cuvs-26-02"
+version = "0.1.0"
+edition = "2024"
+authors = ["Lance Devs <dev@lance.org>"]
+license = "Apache-2.0"
+rust-version = "1.91"
+publish = false
+
+[lib]
+name = "lance_cuvs_backend_cuvs_26_02"
+crate-type = ["rlib", "cdylib"]
+
+[features]
+default = []
+python = ["dep:arrow-pyarrow", "dep:pyo3"]
+
+[dependencies]
+arrow = "57.0.0"
+arrow-array = "57.0.0"
+arrow-buffer = "57.0.0"
+arrow-schema = "57.0.0"
+arrow-pyarrow = { version = "57.3.0", optional = true }
+cuvs = "=26.2.0"
+cuvs-sys = "=26.2.0"
+futures = "0.3"
+half = { version = "2.5", default-features = false, features = ["num-traits", "std"] }
+# This crate depends on unreleased Lance vector-build APIs. Keep the Rust-side
+# Lance dependencies pinned until those APIs stabilize.
+lance = { git = "https://github.com/lance-format/lance.git", rev = "6112a34bfe38618f07c099217dc3d89fd39ca6bb" }
+lance-arrow = { git = "https://github.com/lance-format/lance.git", rev = "6112a34bfe38618f07c099217dc3d89fd39ca6bb" }
+lance-core = { git = "https://github.com/lance-format/lance.git", rev = "6112a34bfe38618f07c099217dc3d89fd39ca6bb" }
+lance-file = { git = "https://github.com/lance-format/lance.git", rev = "6112a34bfe38618f07c099217dc3d89fd39ca6bb" }
+lance-index = { git = "https://github.com/lance-format/lance.git", rev = "6112a34bfe38618f07c099217dc3d89fd39ca6bb" }
+lance-io = { git = "https://github.com/lance-format/lance.git", rev = "6112a34bfe38618f07c099217dc3d89fd39ca6bb" }
+lance-linalg = { git = "https://github.com/lance-format/lance.git", rev = "6112a34bfe38618f07c099217dc3d89fd39ca6bb" }
+log = "0.4"
+ndarray = { version = "0.16.1", features = ["matrixmultiply-threading"] }
+pyo3 = { version = "0.26", optional = true, features = [
+    "extension-module",
+    "abi3-py312",
+] }
+tokio = { version = "1.48", features = ["rt-multi-thread"] }

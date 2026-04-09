@@ -6,7 +6,7 @@
 use crate::backend::{TrainedIvfPqIndex, assign_ivf_pq_to_artifact, train_ivf_pq};
 use arrow_array::Array;
 use arrow_pyarrow::ToPyArrow;
-use lance::dataset::DatasetBuilder;
+use lance::dataset::builder::DatasetBuilder;
 use lance_linalg::distance::DistanceType;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
@@ -15,7 +15,7 @@ use std::collections::HashMap;
 
 #[pyclass(
     name = "IvfPqTrainingOutput",
-    module = "lance_cuvs._native",
+    module = "lance_cuvs_backend_cuvs_26_02._native",
     unsendable
 )]
 /// Python wrapper around a trained cuVS IVF_PQ model.
@@ -67,7 +67,7 @@ impl PyTrainedIvfPqIndex {
 
 #[pyclass(
     name = "IvfPqArtifactOutput",
-    module = "lance_cuvs._native",
+    module = "lance_cuvs_backend_cuvs_26_02._native",
     unsendable
 )]
 /// Python wrapper around a partition-local artifact build result.
@@ -143,7 +143,7 @@ fn train_ivf_pq_py(
     }
     let dataset = runtime
         .block_on(builder.load())
-        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        .map_err(|error: lance::Error| PyRuntimeError::new_err(error.to_string()))?;
     let trained = runtime
         .block_on(train_ivf_pq(
             &dataset,
@@ -194,7 +194,7 @@ fn build_ivf_pq_artifact<'py>(
     }
     let dataset = runtime
         .block_on(builder.load())
-        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+        .map_err(|error: lance::Error| PyRuntimeError::new_err(error.to_string()))?;
     let files = runtime
         .block_on(assign_ivf_pq_to_artifact(
             &dataset,

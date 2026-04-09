@@ -9,20 +9,23 @@ use crate::cuda::{
 };
 use arrow::compute::filter;
 use arrow_array::cast::AsArray;
-use arrow_array::{Array, FixedSizeListArray, ListArray, RecordBatch, UInt8Array, UInt32Array};
+use arrow_array::{
+    Array, ArrayRef, FixedSizeListArray, ListArray, RecordBatch, UInt8Array, UInt32Array,
+};
 use arrow_buffer::{OffsetBuffer, ScalarBuffer};
 use arrow_schema::{DataType, Field, Schema as ArrowSchema};
 use cuvs::Resources;
-use futures::{FutureExt, TryStreamExt, future::LocalBoxFuture};
+use futures::{FutureExt, SinkExt, TryStreamExt, channel::mpsc, future::LocalBoxFuture};
 use lance::dataset::Dataset;
-use lance::index::vector::PartitionArtifactBuilder;
-use lance::index::vector::utils::{infer_vector_dim, vector_column_to_fsl};
+use lance::index::vector::utils::infer_vector_dim;
 use lance_arrow::FixedSizeListArrayExt;
 use lance_core::{Error, ROW_ID, Result};
 use lance_file::version::LanceFileVersion;
 use lance_file::writer::{FileWriter, FileWriterOptions};
+use lance_index::vector::ivf::shuffler::IvfShuffler;
 use lance_index::vector::utils::is_finite;
 use lance_index::vector::{PART_ID_COLUMN, PQ_CODE_COLUMN};
+use lance_io::local::to_local_path;
 use lance_linalg::distance::DistanceType;
 use log::warn;
 use std::collections::HashMap;
@@ -30,6 +33,8 @@ use std::sync::Arc;
 
 const PARTITION_ARTIFACT_METADATA_FILE_NAME: &str = "metadata.lance";
 const PARTITION_ARTIFACT_FILE_VERSION: &str = "2.2";
+const PARTITION_ARTIFACT_UNSORTED_FILE_NAME: &str = "unsorted.lance";
+const PARTITION_ARTIFACT_SHUFFLE_BATCHES_PER_FILE: usize = 16;
 const PIPELINE_SLOTS: usize = 2;
 
 /// A trained cuVS IVF_PQ model that can be reused for artifact builds.
@@ -222,6 +227,63 @@ fn infer_dimension(dataset: &Dataset, column: &str) -> Result<usize> {
         ))
     })?;
     infer_vector_dim(&field.data_type())
+}
+
+fn get_column_from_batch(batch: &RecordBatch, column: &str) -> Result<ArrayRef> {
+    if let Some(col) = batch.column_by_name(column) {
+        return Ok(col.clone());
+    }
+
+    let parts = lance_core::datatypes::parse_field_path(column)
+        .map_err(|error| Error::index(format!("failed to parse field path '{column}': {error}")))?;
+    if parts.is_empty() {
+        return Err(Error::index(format!("invalid empty field path: {column}")));
+    }
+
+    let mut current_array = batch
+        .column_by_name(&parts[0])
+        .ok_or_else(|| {
+            Error::index(format!(
+                "column '{column}' does not exist in batch (missing root field '{}')",
+                parts[0]
+            ))
+        })?
+        .clone();
+
+    for part in &parts[1..] {
+        let struct_array = current_array
+            .as_any()
+            .downcast_ref::<arrow_array::StructArray>()
+            .ok_or_else(|| {
+                Error::index(format!(
+                    "cannot access nested field '{part}' in column '{column}': parent is not a struct"
+                ))
+            })?;
+        current_array = struct_array
+            .column_by_name(part)
+            .ok_or_else(|| {
+                Error::index(format!(
+                    "nested field '{part}' does not exist in column '{column}'"
+                ))
+            })?
+            .clone();
+    }
+
+    Ok(current_array)
+}
+
+fn vector_column_to_fsl(batch: &RecordBatch, column: &str) -> Result<FixedSizeListArray> {
+    let array = get_column_from_batch(batch, column)?;
+    match array.data_type() {
+        DataType::FixedSizeList(_, _) => Ok(array.as_fixed_size_list().clone()),
+        DataType::List(_) => {
+            let list_array = array.as_list::<i32>();
+            Ok(list_array.values().as_fixed_size_list().clone())
+        }
+        _ => Err(Error::index(format!(
+            "column '{column}' is not a vector column"
+        ))),
+    }
 }
 
 fn build_metadata_batch(
@@ -803,35 +865,78 @@ pub async fn assign_ivf_pq_to_artifact(
     filter_nan: bool,
     storage_options: Option<&HashMap<String, String>>,
 ) -> Result<Vec<String>> {
-    let code_width = trained.pq_code_width();
-    let builder = Arc::new(tokio::sync::Mutex::new(
-        PartitionArtifactBuilder::try_new(
-            artifact_uri,
-            trained.num_partitions,
-            code_width,
-            storage_options,
-        )
-        .await?,
-    ));
-    for_each_transformed_batch(dataset, column, trained, batch_size, filter_nan, |batch| {
-        let builder = builder.clone();
-        async move {
-            builder.lock().await.append_batch(&batch).await?;
-            Ok(())
+    let registry = Arc::new(lance_io::object_store::ObjectStoreRegistry::default());
+    let params = if let Some(storage_options) = storage_options {
+        lance_io::object_store::ObjectStoreParams {
+            storage_options_accessor: Some(Arc::new(
+                lance_io::object_store::StorageOptionsAccessor::with_static_options(
+                    storage_options.clone(),
+                ),
+            )),
+            ..Default::default()
         }
-    })
-    .await?;
-    let mut builder = Arc::try_unwrap(builder)
-        .map_err(|_| Error::io("partition artifact builder still has outstanding references"))?
-        .into_inner();
-
-    write_partition_artifact_metadata(artifact_uri, trained, storage_options).await?;
-    let mut files = builder
-        .finish(PARTITION_ARTIFACT_METADATA_FILE_NAME, None)
-        .await?;
-    if files.len() > 1 {
-        files.insert(1, PARTITION_ARTIFACT_METADATA_FILE_NAME.to_string());
+    } else {
+        lance_io::object_store::ObjectStoreParams::default()
+    };
+    let (object_store, root_dir) =
+        lance::io::ObjectStore::from_uri_and_params(registry, artifact_uri, &params)
+            .await
+            .map_err(|error| Error::io(error.to_string()))?;
+    if !object_store.is_local() {
+        return Err(Error::not_supported(
+            "partition artifact builds currently require a local filesystem artifact_uri",
+        ));
     }
+
+    std::fs::create_dir_all(to_local_path(&root_dir))
+        .map_err(|error| Error::io(format!("failed to create artifact directory: {error}")))?;
+
+    let (mut tx, rx) = mpsc::channel::<Result<RecordBatch>>(PIPELINE_SLOTS);
+    let mut shuffler = IvfShuffler::try_new(
+        trained.num_partitions as u32,
+        Some(root_dir.clone()),
+        true,
+        None,
+    )?;
+    shuffler = shuffler.with_format_version(LanceFileVersion::V2_0);
+
+    let shuffle_task = tokio::spawn(async move {
+        shuffler.write_unsorted_stream(rx).await?;
+        shuffler
+            .write_partitioned_shuffles(PARTITION_ARTIFACT_SHUFFLE_BATCHES_PER_FILE, PIPELINE_SLOTS)
+            .await
+    });
+
+    let produce_result =
+        for_each_transformed_batch(dataset, column, trained, batch_size, filter_nan, |batch| {
+            let mut tx = tx.clone();
+            async move {
+                tx.send(Ok(batch)).await.map_err(|error| {
+                    Error::io(format!("failed to forward transformed batch: {error}"))
+                })
+            }
+        })
+        .await;
+    drop(tx);
+
+    produce_result?;
+    write_partition_artifact_metadata(artifact_uri, trained, storage_options).await?;
+
+    let mut files = shuffle_task
+        .await
+        .map_err(|error| Error::io(format!("partition artifact shuffle task failed: {error}")))??;
+
+    let unsorted_path = root_dir.child(PARTITION_ARTIFACT_UNSORTED_FILE_NAME);
+    let unsorted_local_path = to_local_path(&unsorted_path);
+    if std::path::Path::new(&unsorted_local_path).exists() {
+        std::fs::remove_file(&unsorted_local_path).map_err(|error| {
+            Error::io(format!(
+                "failed to remove temporary unsorted buffer: {error}"
+            ))
+        })?;
+    }
+
+    files.push(PARTITION_ARTIFACT_METADATA_FILE_NAME.to_string());
     Ok(files)
 }
 

@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright The Lance Authors
 
-//! cuVS-backed vector index build helpers for Lance.
+//! cuVS 26.02 backend implementation for `lance-cuvs`.
 //!
-//! This crate is intentionally narrow:
+//! This backend crate is intentionally narrow:
 //! - it trains IVF_PQ models with cuVS,
 //! - it encodes a Lance dataset into a partition-local artifact,
 //! - and it stops before Lance's canonical finalize step.

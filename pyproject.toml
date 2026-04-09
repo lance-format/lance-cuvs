@@ -1,7 +1,7 @@
 [project]
 name = "lance-cuvs"
 version = "0.1.0"
-description = "cuVS-backed vector index build backend for Lance"
+description = "Version-dispatched cuVS backend loader for Lance"
 authors = [{ name = "Lance Devs", email = "dev@lance.org" }]
 license = { file = "LICENSE" }
 readme = "README.md"
@@ -11,14 +11,30 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Rust",
 ]
 
 [build-system]
-requires = ["maturin>=1.4,<2"]
-build-backend = "maturin"
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
 
-[tool.maturin]
-python-source = "python"
-module-name = "lance_cuvs._native"
-features = ["python"]
+[dependency-groups]
+dev = [
+    "cmake>=3.30.4; sys_platform == 'linux'",
+    "libcuvs-cu12==26.2.0; sys_platform == 'linux'",
+    "maturin>=1.4,<2; sys_platform == 'linux'",
+    "pylance",
+    "pytest>=8",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["python/lance_cuvs"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "python/lance_cuvs",
+    "README.md",
+    "LICENSE",
+]
+
+[tool.pytest.ini_options]
+markers = ["gpu: tests that require a CUDA-capable GPU"]
