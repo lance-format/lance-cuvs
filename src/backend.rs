@@ -25,6 +25,7 @@ use lance_index::vector::utils::is_finite;
 use lance_index::vector::{PART_ID_COLUMN, PQ_CODE_COLUMN};
 use lance_linalg::distance::DistanceType;
 use log::warn;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 const PARTITION_ARTIFACT_METADATA_FILE_NAME: &str = "metadata.lance";
@@ -196,6 +197,7 @@ impl VectorBuildBackend for CuvsVectorBuildBackend {
                         &params.artifact_uri,
                         params.batch_size,
                         params.filter_nan,
+                        None,
                     )
                     .await?;
                     Ok(VectorIndexBuildOutput::PartitionArtifact(
@@ -277,10 +279,25 @@ fn metadata_writer_options() -> Result<FileWriterOptions> {
 async fn write_partition_artifact_metadata(
     artifact_uri: &str,
     trained: &TrainedIvfPqIndex,
+    storage_options: Option<&HashMap<String, String>>,
 ) -> Result<()> {
-    let (object_store, root_dir) = lance::io::ObjectStore::from_uri(artifact_uri)
-        .await
-        .map_err(|error| Error::io(error.to_string()))?;
+    let registry = Arc::new(lance_io::object_store::ObjectStoreRegistry::default());
+    let params = if let Some(storage_options) = storage_options {
+        lance_io::object_store::ObjectStoreParams {
+            storage_options_accessor: Some(Arc::new(
+                lance_io::object_store::StorageOptionsAccessor::with_static_options(
+                    storage_options.clone(),
+                ),
+            )),
+            ..Default::default()
+        }
+    } else {
+        lance_io::object_store::ObjectStoreParams::default()
+    };
+    let (object_store, root_dir) =
+        lance::io::ObjectStore::from_uri_and_params(registry, artifact_uri, &params)
+            .await
+            .map_err(|error| Error::io(error.to_string()))?;
     let path = root_dir.child(PARTITION_ARTIFACT_METADATA_FILE_NAME);
     let batch = build_metadata_batch(&trained.ivf_centroids, &trained.pq_codebook)?;
     let mut writer = FileWriter::try_new(
@@ -784,11 +801,17 @@ pub async fn assign_ivf_pq_to_artifact(
     artifact_uri: &str,
     batch_size: usize,
     filter_nan: bool,
+    storage_options: Option<&HashMap<String, String>>,
 ) -> Result<Vec<String>> {
     let code_width = trained.pq_code_width();
     let builder = Arc::new(tokio::sync::Mutex::new(
-        PartitionArtifactBuilder::try_new(artifact_uri, trained.num_partitions, code_width, None)
-            .await?,
+        PartitionArtifactBuilder::try_new(
+            artifact_uri,
+            trained.num_partitions,
+            code_width,
+            storage_options,
+        )
+        .await?,
     ));
     for_each_transformed_batch(dataset, column, trained, batch_size, filter_nan, |batch| {
         let builder = builder.clone();
@@ -802,7 +825,7 @@ pub async fn assign_ivf_pq_to_artifact(
         .map_err(|_| Error::io("partition artifact builder still has outstanding references"))?
         .into_inner();
 
-    write_partition_artifact_metadata(artifact_uri, trained).await?;
+    write_partition_artifact_metadata(artifact_uri, trained, storage_options).await?;
     let mut files = builder
         .finish(PARTITION_ARTIFACT_METADATA_FILE_NAME, None)
         .await?;

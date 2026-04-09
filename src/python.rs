@@ -6,11 +6,12 @@
 use crate::backend::{TrainedIvfPqIndex, assign_ivf_pq_to_artifact, train_ivf_pq};
 use arrow_array::Array;
 use arrow_pyarrow::ToPyArrow;
-use lance::dataset::Dataset;
+use lance::dataset::DatasetBuilder;
 use lance_linalg::distance::DistanceType;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyModule;
+use std::collections::HashMap;
 
 #[pyclass(
     name = "IvfPqTrainingOutput",
@@ -114,6 +115,7 @@ fn parse_distance_type(metric: &str) -> PyResult<DistanceType> {
         max_iters = 50,
         num_bits = 8,
         filter_nan = true,
+        storage_options = None,
     )
 )]
 #[pyo3(name = "train_ivf_pq")]
@@ -129,13 +131,18 @@ fn train_ivf_pq_py(
     max_iters: usize,
     num_bits: usize,
     filter_nan: bool,
+    storage_options: Option<HashMap<String, String>>,
 ) -> PyResult<Py<PyTrainedIvfPqIndex>> {
     let metric_type = parse_distance_type(metric_type)?;
     let runtime = tokio::runtime::Runtime::new()
         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
 
+    let mut builder = DatasetBuilder::from_uri(dataset_uri);
+    if let Some(storage_options) = storage_options {
+        builder = builder.with_storage_options(storage_options);
+    }
     let dataset = runtime
-        .block_on(Dataset::open(dataset_uri))
+        .block_on(builder.load())
         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
     let trained = runtime
         .block_on(train_ivf_pq(
@@ -164,6 +171,7 @@ fn train_ivf_pq_py(
         training,
         batch_size = 1024 * 128,
         filter_nan = true,
+        storage_options = None,
     )
 )]
 /// Encode a dataset into a partition-local IVF_PQ artifact.
@@ -175,12 +183,17 @@ fn build_ivf_pq_artifact<'py>(
     training: PyRef<'py, PyTrainedIvfPqIndex>,
     batch_size: usize,
     filter_nan: bool,
+    storage_options: Option<HashMap<String, String>>,
 ) -> PyResult<Py<PyPartitionArtifactBuildOutput>> {
     let runtime = tokio::runtime::Runtime::new()
         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
 
+    let mut builder = DatasetBuilder::from_uri(dataset_uri);
+    if let Some(storage_options) = storage_options.clone() {
+        builder = builder.with_storage_options(storage_options);
+    }
     let dataset = runtime
-        .block_on(Dataset::open(dataset_uri))
+        .block_on(builder.load())
         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
     let files = runtime
         .block_on(assign_ivf_pq_to_artifact(
@@ -190,6 +203,7 @@ fn build_ivf_pq_artifact<'py>(
             artifact_uri,
             batch_size,
             filter_nan,
+            storage_options.as_ref(),
         ))
         .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
 
