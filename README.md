@@ -105,6 +105,12 @@ Run commands inside the shared development container with:
 tools/run_in_container.sh -- bash
 ```
 
+Use `--platform linux/amd64` only when you explicitly want to match the GitHub-hosted runner architecture:
+
+```bash
+tools/run_in_container.sh --platform linux/amd64 -- bash
+```
+
 Run the CI-equivalent CPU build locally with:
 
 ```bash

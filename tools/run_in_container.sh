@@ -4,7 +4,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE_TAG="${LANCE_CUVS_CONTAINER_IMAGE:-nvidia/cuda:12.9.1-devel-ubuntu24.04}"
-PLATFORM="${LANCE_CUVS_CONTAINER_PLATFORM:-linux/amd64}"
+PLATFORM="${LANCE_CUVS_CONTAINER_PLATFORM:-}"
 GPU_ARGS=()
 TTY_ARGS=()
 CACHE_ROOT="${LANCE_CUVS_CONTAINER_CACHE:-${HOME}/.cache/lance-cuvs-container}"
@@ -21,6 +21,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --image)
       IMAGE_TAG="$2"
+      shift 2
+      ;;
+    --platform)
+      PLATFORM="$2"
       shift 2
       ;;
     --)
@@ -47,9 +51,11 @@ fi
 if ((${#GPU_ARGS[@]} > 0)); then
   DOCKER_ARGS+=("${GPU_ARGS[@]}")
 fi
+if [[ -n "$PLATFORM" ]]; then
+  DOCKER_ARGS+=(--platform "$PLATFORM")
+fi
 
 docker "${DOCKER_ARGS[@]}" \
-  --platform "$PLATFORM" \
   -e UV_EXTRA_INDEX_URL="${UV_EXTRA_INDEX_URL:-https://pypi.nvidia.com}" \
   -e CARGO_HOME=/root/.cargo \
   -e RUSTUP_HOME=/root/.rustup \

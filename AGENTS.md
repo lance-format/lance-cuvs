@@ -63,6 +63,8 @@ Keep that boundary intact. Do not reintroduce `pylance` convenience wrappers or 
 tools/run_in_container.sh -- bash
 ```
 
+Add `--platform linux/amd64` only when you specifically need to mirror GitHub-hosted runner architecture.
+
 ### Root development environment
 
 ```bash
