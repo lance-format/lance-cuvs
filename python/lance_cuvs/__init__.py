@@ -1,4 +1,4 @@
-"""Version-dispatched public API for `lance-cuvs`."""
+"""Version-dispatched public API for `pylance-cuvs`."""
 
 from __future__ import annotations
 

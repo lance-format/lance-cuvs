@@ -1,4 +1,4 @@
-"""Backend selection for versioned cuVS runtime integrations."""
+"""Backend selection for CUDA runtime-specific cuVS integrations."""
 
 from __future__ import annotations
 
@@ -18,18 +18,32 @@ class BackendSpec:
     key: str
     module: str
     distribution: str
+    runtime_distribution: str
     runtime_major: int
     runtime_minor: int
 
 
+@dataclass(frozen=True)
+class RuntimeSpec:
+    distribution: str
+    version: str
+
+
 SUPPORTED_BACKENDS: dict[str, BackendSpec] = {
-    "cuvs-26-02": BackendSpec(
-        key="cuvs-26-02",
-        module="lance_cuvs_backend_cuvs_26_02",
-        distribution="lance-cuvs-backend-cuvs-26-02",
+    "cu12": BackendSpec(
+        key="cu12",
+        module="lance_cuvs_backend_cu12",
+        distribution="pylance-cuvs-cu12",
+        runtime_distribution="libcuvs-cu12",
         runtime_major=26,
         runtime_minor=2,
     ),
+}
+
+_LEGACY_BACKEND_KEYS = {
+    "cuvs_26_02": "cu12",
+    "cuvs26_02": "cu12",
+    "cuvs2602": "cu12",
 }
 
 _BACKEND: ModuleType | None = None
@@ -141,46 +155,68 @@ def _preload_shared_libraries() -> None:
         )
 
 
+def _supported_backend_summary() -> str:
+    return ", ".join(
+        f"{spec.key} ({spec.runtime_distribution} {spec.runtime_major}.{spec.runtime_minor:02d})"
+        for spec in sorted(SUPPORTED_BACKENDS.values(), key=lambda item: item.key)
+    )
+
+
 def _normalize_backend_key(value: str) -> str:
     normalized = value.strip().lower().replace("-", "_")
-    if normalized.startswith("lance_cuvs_backend_"):
-        normalized = normalized.removeprefix("lance_cuvs_backend_")
-
-    match = re.fullmatch(r"cuvs[_]?(\d+)[_.]?(\d+)", normalized)
-    if match:
-        return f"cuvs-{int(match.group(1)):02d}-{int(match.group(2)):02d}"
+    for prefix in (
+        "pylance_cuvs_backend_",
+        "lance_cuvs_backend_",
+        "pylance_cuvs_",
+    ):
+        if normalized.startswith(prefix):
+            normalized = normalized.removeprefix(prefix)
+            break
 
     if normalized in SUPPORTED_BACKENDS:
         return normalized
+    if normalized in _LEGACY_BACKEND_KEYS:
+        return _LEGACY_BACKEND_KEYS[normalized]
 
-    supported = ", ".join(sorted(SUPPORTED_BACKENDS))
+    match = re.fullmatch(r"cu(\d+)", normalized)
+    if match:
+        return f"cu{int(match.group(1))}"
+
+    supported = _supported_backend_summary()
     raise ImportError(
         f"Unsupported LANCE_CUVS_BACKEND={value!r}. Supported backends: {supported}"
     )
 
 
-def detect_cuvs_runtime_version() -> str | None:
-    for distribution in ("libcuvs-cu12", "libcuvs-cu11", "libcuvs", "cuvs"):
+def detect_cuvs_runtime() -> RuntimeSpec | None:
+    for distribution in ("libcuvs-cu13", "libcuvs-cu12", "libcuvs", "cuvs"):
         try:
-            return importlib.metadata.version(distribution)
+            return RuntimeSpec(
+                distribution=distribution,
+                version=importlib.metadata.version(distribution),
+            )
         except importlib.metadata.PackageNotFoundError:
             continue
     return None
 
 
-def backend_key_for_runtime(version: str) -> str:
-    match = re.match(r"^\s*(\d+)\.(\d+)", version)
-    if match is None:
-        raise ImportError(f"Unable to parse cuVS runtime version {version!r}")
+def backend_key_for_runtime(runtime: RuntimeSpec) -> str:
+    for key, spec in SUPPORTED_BACKENDS.items():
+        if runtime.distribution == spec.runtime_distribution:
+            return key
 
-    key = f"cuvs-{int(match.group(1)):02d}-{int(match.group(2)):02d}"
-    if key not in SUPPORTED_BACKENDS:
-        supported = ", ".join(sorted(SUPPORTED_BACKENDS))
+    if runtime.distribution in {"libcuvs", "cuvs"}:
         raise ImportError(
-            f"Detected cuVS runtime {version}, but no lance-cuvs backend is "
-            f"available for {key}. Supported backends: {supported}"
+            f"Detected cuVS runtime package {runtime.distribution}=={runtime.version}, "
+            "but its CUDA runtime line is ambiguous. Install a runtime-specific "
+            "package such as libcuvs-cu12, or set LANCE_CUVS_BACKEND explicitly."
         )
-    return key
+
+    supported = _supported_backend_summary()
+    raise ImportError(
+        f"Detected cuVS runtime package {runtime.distribution}=={runtime.version}, "
+        f"but no pylance-cuvs backend is available for it. Supported backends: {supported}"
+    )
 
 
 def resolve_backend() -> BackendSpec:
@@ -188,16 +224,16 @@ def resolve_backend() -> BackendSpec:
     if override:
         return SUPPORTED_BACKENDS[_normalize_backend_key(override)]
 
-    runtime_version = detect_cuvs_runtime_version()
-    if runtime_version is None:
-        supported = ", ".join(sorted(SUPPORTED_BACKENDS))
+    runtime = detect_cuvs_runtime()
+    if runtime is None:
+        supported = _supported_backend_summary()
         raise ImportError(
             "Unable to detect an installed cuVS runtime. Install a supported "
-            "libcuvs Python package and matching lance-cuvs backend, or set "
+            "libcuvs Python package and matching pylance-cuvs backend, or set "
             f"LANCE_CUVS_BACKEND explicitly. Supported backends: {supported}"
         )
 
-    return SUPPORTED_BACKENDS[backend_key_for_runtime(runtime_version)]
+    return SUPPORTED_BACKENDS[backend_key_for_runtime(runtime)]
 
 
 def load_backend() -> ModuleType:
@@ -213,7 +249,7 @@ def load_backend() -> ModuleType:
     except ModuleNotFoundError as exc:
         if exc.name == spec.module:
             raise ImportError(
-                f"Detected cuVS runtime backend {spec.key}, but Python package "
+                f"Detected CUDA backend {spec.key}, but Python package "
                 f"{spec.distribution!r} is not installed."
             ) from exc
         raise

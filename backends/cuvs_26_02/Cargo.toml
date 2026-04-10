@@ -1,5 +1,5 @@
 [package]
-name = "lance-cuvs-backend-cuvs-26-02"
+name = "pylance-cuvs-cu12"
 version = "0.1.0"
 edition = "2024"
 authors = ["Lance Devs <dev@lance.org>"]
@@ -8,7 +8,7 @@ rust-version = "1.91"
 publish = false
 
 [lib]
-name = "lance_cuvs_backend_cuvs_26_02"
+name = "lance_cuvs_backend_cu12"
 crate-type = ["rlib", "cdylib"]
 
 [features]

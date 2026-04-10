@@ -1,4 +1,4 @@
-"""Python bindings for the cuVS 26.02 `lance-cuvs` backend package."""
+"""Python bindings for the CUDA 12 `pylance-cuvs` backend package."""
 
 from __future__ import annotations
 

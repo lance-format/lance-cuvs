@@ -3342,32 +3342,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lance-cuvs-backend-cuvs-26-02"
-version = "0.1.0"
-dependencies = [
- "arrow",
- "arrow-array",
- "arrow-buffer",
- "arrow-pyarrow",
- "arrow-schema",
- "cuvs",
- "cuvs-sys",
- "futures",
- "half",
- "lance",
- "lance-arrow",
- "lance-core",
- "lance-file",
- "lance-index",
- "lance-io",
- "lance-linalg",
- "log",
- "ndarray 0.16.1",
- "pyo3",
- "tokio",
-]
-
-[[package]]
 name = "lance-datafusion"
 version = "5.0.0-beta.5"
 source = "git+https://github.com/lance-format/lance.git?rev=6112a34bfe38618f07c099217dc3d89fd39ca6bb#6112a34bfe38618f07c099217dc3d89fd39ca6bb"
@@ -4661,6 +4635,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8991c4cbdb8bc5b11f0b074ffe286c30e523de90fee5ba8132f1399f23cb3dd7"
 dependencies = [
  "prost",
+]
+
+[[package]]
+name = "pylance-cuvs-cu12"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "arrow-array",
+ "arrow-buffer",
+ "arrow-pyarrow",
+ "arrow-schema",
+ "cuvs",
+ "cuvs-sys",
+ "futures",
+ "half",
+ "lance",
+ "lance-arrow",
+ "lance-core",
+ "lance-file",
+ "lance-index",
+ "lance-io",
+ "lance-linalg",
+ "log",
+ "ndarray 0.16.1",
+ "pyo3",
+ "tokio",
 ]
 
 [[package]]
