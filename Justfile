@@ -74,10 +74,11 @@ test-gpu-wheel:
   uv pip install --python "$tmpdir/venv/bin/python" \
     pytest \
     pylance \
-    libcuvs-cu12==26.2.0 \
     "$root_wheel" \
     "$backend_wheel"; \
-  LANCE_CUVS_REQUIRE_GPU="${LANCE_CUVS_REQUIRE_GPU:-1}" "$tmpdir/venv/bin/python" -m pytest -q tests/test_smoke.py
+  LANCE_CUVS_BACKEND=cu12 \
+  LANCE_CUVS_REQUIRE_GPU="${LANCE_CUVS_REQUIRE_GPU:-1}" \
+  "$tmpdir/venv/bin/python" -m pytest -q tests/test_smoke.py
 
 gpu-smoke: build-wheels test-gpu-wheel
   @:
