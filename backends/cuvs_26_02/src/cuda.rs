@@ -615,7 +615,7 @@ pub(crate) fn matrix_from_vectors<'a>(vectors: &'a FixedSizeListArray) -> Result
 
 pub(crate) fn ivf_centroids_from_host(array: Array2<f32>) -> Result<FixedSizeListArray> {
     let dim = array.ncols() as i32;
-    let values = arrow_array::Float32Array::from_iter_values(array.into_iter());
+    let values = arrow_array::Float32Array::from_iter_values(array);
     Ok(FixedSizeListArray::try_new_from_values(values, dim)?)
 }
 

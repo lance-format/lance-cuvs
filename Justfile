@@ -4,6 +4,7 @@ root := justfile_directory()
 uv_project := "uv run --project '" + root + "' --no-sync"
 cmake_cmd := uv_project + " python -c 'import shutil; print(shutil.which(\"cmake\") or \"\")'"
 rapids_env := "export CMAKE=\"$(" + cmake_cmd + ")\"; eval \"$(" + uv_project + " python tools/rapids_env.py --format shell)\""
+dist_dir := root + "/dist"
 
 default:
   @just --list
@@ -25,31 +26,62 @@ backend-wheel: sync-dev
 backend-develop: sync-dev
   {{rapids_env}} && cd backends/cuvs_26_02 && {{uv_project}} maturin develop --release --locked
 
-python-build: sync-dev
+build-wheels: sync-dev
   rm -rf dist
   mkdir -p dist
   {{uv_project}} python -m py_compile \
     python/lance_cuvs/__init__.py \
     python/lance_cuvs/_loader.py \
     backends/cuvs_26_02/python/lance_cuvs_backend_cu12/__init__.py
-  {{uv_project}} pytest -q tests/test_loader.py
   uv build --wheel --out-dir dist
   {{rapids_env}} && cd backends/cuvs_26_02 && {{uv_project}} maturin build --release --locked --out ../../dist
 
-rust-build: sync-dev-no-project
-  {{rapids_env}} && cargo build --manifest-path backends/cuvs_26_02/Cargo.toml --locked --all-targets
+python-build: build-wheels test-loader-wheel
+  @:
 
-python-release: sync-dev
-  rm -rf dist
-  mkdir -p dist
-  {{rapids_env}} && uv build --wheel --out-dir dist
-  uv build --sdist --out-dir dist
-  cd backends/cuvs_26_02 && {{uv_project}} maturin build --release --locked --out ../../dist
-  cd backends/cuvs_26_02 && {{uv_project}} maturin sdist --out ../../dist
+python-release: build-wheels
+  @:
 
-gpu-smoke: sync-dev
-  {{rapids_env}} && cd backends/cuvs_26_02 && {{uv_project}} maturin develop --release --locked
-  cd {{root}} && LANCE_CUVS_REQUIRE_GPU="${LANCE_CUVS_REQUIRE_GPU:-1}" {{uv_project}} pytest -q tests/test_smoke.py
+rust-fmt-check:
+  cargo fmt --manifest-path backends/cuvs_26_02/Cargo.toml --all --check
+
+rust-clippy: sync-dev-no-project
+  {{rapids_env}} && cargo clippy --manifest-path backends/cuvs_26_02/Cargo.toml --locked --all-targets --features python -- -D warnings
+
+rust-check: sync-dev-no-project
+  {{rapids_env}} && cargo check --manifest-path backends/cuvs_26_02/Cargo.toml --locked --all-targets --features python
+
+rust-build: rust-fmt-check rust-clippy rust-check
+  @:
+
+test-loader-wheel:
+  @root_wheel="$(find '{{dist_dir}}' -maxdepth 1 -type f -name 'pylance_cuvs-*.whl' | head -n 1)"; \
+  test -n "$root_wheel"; \
+  tmpdir="$(mktemp -d)"; \
+  trap 'rm -rf "$tmpdir"' EXIT; \
+  uv venv --python 3.12 "$tmpdir/venv"; \
+  uv pip install --python "$tmpdir/venv/bin/python" pytest "$root_wheel"; \
+  "$tmpdir/venv/bin/python" -m pytest -q tests/test_loader.py
+
+test-gpu-wheel:
+  @root_wheel="$(find '{{dist_dir}}' -maxdepth 1 -type f -name 'pylance_cuvs-*.whl' | head -n 1)"; \
+  backend_wheel="$(find '{{dist_dir}}' -maxdepth 1 -type f -name 'pylance_cuvs_cu12-*.whl' | head -n 1)"; \
+  test -n "$root_wheel"; \
+  test -n "$backend_wheel"; \
+  tmpdir="$(mktemp -d)"; \
+  trap 'rm -rf "$tmpdir"' EXIT; \
+  uv venv --python 3.12 "$tmpdir/venv"; \
+  uv pip install --python "$tmpdir/venv/bin/python" \
+    pytest \
+    pylance \
+    "$root_wheel" \
+    "$backend_wheel"; \
+  LANCE_CUVS_BACKEND=cu12 \
+  LANCE_CUVS_REQUIRE_GPU="${LANCE_CUVS_REQUIRE_GPU:-1}" \
+  "$tmpdir/venv/bin/python" -m pytest -q tests/test_smoke.py
+
+gpu-smoke: build-wheels test-gpu-wheel
+  @:
 
 container-shell:
   tools/run_in_container.sh -- bash

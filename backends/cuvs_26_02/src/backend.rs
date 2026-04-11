@@ -702,6 +702,7 @@ where
 /// # Ok(())
 /// # }
 /// ```
+#[allow(clippy::too_many_arguments)]
 pub async fn train_ivf_pq(
     dataset: &Dataset,
     column: &str,
@@ -891,7 +892,7 @@ pub async fn assign_ivf_pq_to_artifact(
     std::fs::create_dir_all(to_local_path(&root_dir))
         .map_err(|error| Error::io(format!("failed to create artifact directory: {error}")))?;
 
-    let (mut tx, rx) = mpsc::channel::<Result<RecordBatch>>(PIPELINE_SLOTS);
+    let (tx, rx) = mpsc::channel::<Result<RecordBatch>>(PIPELINE_SLOTS);
     let mut shuffler = IvfShuffler::try_new(
         trained.num_partitions as u32,
         Some(root_dir.clone()),
