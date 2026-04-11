@@ -1,159 +1,35 @@
 name: Python Release
 
 on:
-  workflow_dispatch:
-  push:
-    tags:
-      - "v*"
+  workflow_run:
+    workflows:
+      - Python Release Verify
+    types:
+      - completed
 
 concurrency:
-  group: python-release-${{ github.ref }}
+  group: python-release-${{ github.event.workflow_run.id }}
   cancel-in-progress: true
 
 env:
   UV_EXTRA_INDEX_URL: https://pypi.nvidia.com
 
 jobs:
-  build-wheels:
-    runs-on: ubuntu-24.04
-    container:
-      image: nvidia/cuda:12.9.1-devel-ubuntu24.04
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install system dependencies
-        run: |
-          apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            build-essential \
-            clang \
-            cmake \
-            curl \
-            git \
-            just \
-            libprotobuf-dev \
-            libssl-dev \
-            patchelf \
-            pkg-config \
-            protobuf-compiler
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: astral-sh/setup-uv@v6
-        with:
-          enable-cache: true
-
-      - name: Install Python 3.12
-        run: uv python install 3.12
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            backends/cuvs_26_02 -> target
-
-      - name: Build release wheels
-        run: just build-wheels
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: python-release-dist
-          path: dist/*
-
-  test-loader-wheel:
-    needs: build-wheels
-    runs-on: ubuntu-24.04
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            just
-
-      - uses: astral-sh/setup-uv@v6
-        with:
-          enable-cache: true
-
-      - name: Install Python 3.12
-        run: uv python install 3.12
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: python-release-dist
-          path: dist
-
-      - name: Test root wheel in a clean environment
-        run: just test-loader-wheel
-
-  test-gpu-wheel:
-    needs: build-wheels
-    runs-on: ubuntu-24.04-4x-gpu
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Verify GPU runner
-        run: |
-          if ! command -v nvidia-smi >/dev/null 2>&1; then
-            echo "This workflow requires a GPU-capable runner with nvidia-smi available." >&2
-            exit 1
-          fi
-          nvidia-smi
-
-      - name: Ensure CUDA toolkit
-        run: |
-          if ! command -v nvcc >/dev/null 2>&1; then
-            curl -fsSL -o /tmp/cuda-keyring.deb \
-              https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
-            sudo dpkg -i /tmp/cuda-keyring.deb
-            sudo apt-get update
-            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-              cuda-toolkit-12-9
-          fi
-          export CUDA_HOME=/usr/local/cuda-12.9
-          export PATH="$CUDA_HOME/bin:$PATH"
-          echo "/usr/local/cuda-12.9/bin" >> "$GITHUB_PATH"
-          echo "CUDA_HOME=/usr/local/cuda-12.9" >> "$GITHUB_ENV"
-          nvcc --version
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            just
-
-      - uses: astral-sh/setup-uv@v6
-        with:
-          enable-cache: true
-
-      - name: Install Python 3.12
-        run: uv python install 3.12
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: python-release-dist
-          path: dist
-
-      - name: Test published wheels on a GPU runner
-        env:
-          LANCE_CUVS_REQUIRE_GPU: "1"
-        run: just test-gpu-wheel
-
   publish:
-    needs:
-      - test-loader-wheel
-      - test-gpu-wheel
+    if: github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-24.04
     permissions:
+      actions: read
+      contents: read
       id-token: write
 
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v5
         with:
           name: python-release-dist
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ github.event.workflow_run.id }}
           path: dist
 
       - uses: pypa/gh-action-pypi-publish@release/v1
