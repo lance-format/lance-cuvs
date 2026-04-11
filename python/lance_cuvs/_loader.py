@@ -125,27 +125,39 @@ def _preload_shared_libraries() -> None:
     if _PRELOAD_DONE:
         return
 
-    candidates = [
-        "libcudart.so",
-        "libcudart.so.12",
-        "librapids_logger.so",
-        "librmm.so",
-        "libraft.so",
-        "libcuvs_c.so",
+    candidate_groups = [
+        ("libcudart", ("libcudart.so.12", "libcudart.so")),
+        ("librapids_logger", ("librapids_logger.so",)),
+        ("librmm", ("librmm.so",)),
+        ("libraft", ("libraft.so",)),
+        ("libcuvs_c", ("libcuvs_c.so",)),
     ]
     loaded: list[str] = []
     failures: list[str] = []
 
-    for root in _shared_library_roots():
-        for name in candidates:
-            for path in sorted(root.glob(f"{name}*")):
-                if not path.is_file():
-                    continue
+    for _, names in candidate_groups:
+        loaded_this_group = False
+        for root in _shared_library_roots():
+            paths: list[Path] = []
+            seen_paths: set[Path] = set()
+            for name in names:
+                for path in [root / name, *sorted(root.glob(f"{name}*"))]:
+                    if not path.is_file() or path in seen_paths:
+                        continue
+                    seen_paths.add(path)
+                    paths.append(path)
+
+            for path in paths:
                 try:
                     ctypes.CDLL(os.fspath(path), mode=ctypes.RTLD_GLOBAL)
                     loaded.append(os.fspath(path))
+                    loaded_this_group = True
+                    break
                 except OSError as exc:
                     failures.append(f"{path}: {exc}")
+
+            if loaded_this_group:
+                break
 
     _PRELOAD_DONE = True
     if not loaded and failures:

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 import types
 
 import pytest
@@ -65,3 +66,42 @@ def test_load_backend_imports_selected_module(monkeypatch: pytest.MonkeyPatch) -
     loaded = _loader.load_backend()
 
     assert loaded is backend
+
+
+def test_preload_shared_libraries_prefers_first_matching_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+
+    for root in (first, second):
+        for name in (
+            "libcudart.so.12",
+            "librapids_logger.so",
+            "librmm.so",
+            "libraft.so",
+            "libcuvs_c.so",
+        ):
+            (root / name).write_bytes(b"")
+
+    calls: list[str] = []
+
+    def fake_cdll(path: str, *, mode: int) -> object:
+        calls.append(path)
+        return object()
+
+    monkeypatch.setattr(_loader, "_PRELOAD_DONE", False)
+    monkeypatch.setattr(_loader, "_shared_library_roots", lambda: [first, second])
+    monkeypatch.setattr(_loader.ctypes, "CDLL", fake_cdll)
+
+    _loader._preload_shared_libraries()
+
+    assert calls == [
+        str(first / "libcudart.so.12"),
+        str(first / "librapids_logger.so"),
+        str(first / "librmm.so"),
+        str(first / "libraft.so"),
+        str(first / "libcuvs_c.so"),
+    ]
