@@ -70,7 +70,17 @@ def _iter_site_roots() -> list[Path]:
     return roots
 
 
-def _shared_library_roots() -> list[Path]:
+def _dedupe_paths(paths: list[Path]) -> list[Path]:
+    deduped: list[Path] = []
+    seen: set[Path] = set()
+    for path in paths:
+        if path not in seen:
+            deduped.append(path)
+            seen.add(path)
+    return deduped
+
+
+def _runtime_library_roots() -> list[Path]:
     roots: list[Path] = []
 
     for site_root in _iter_site_roots():
@@ -89,6 +99,12 @@ def _shared_library_roots() -> list[Path]:
                 )
             ):
                 roots.append(candidate)
+
+    return _dedupe_paths(roots)
+
+
+def _cuda_library_roots() -> list[Path]:
+    roots: list[Path] = []
 
     for env_name in ("CUDA_HOME", "CUDA_PATH"):
         cuda_home = os.environ.get(env_name)
@@ -111,43 +127,80 @@ def _shared_library_roots() -> list[Path]:
         if candidate.is_dir():
             roots.append(candidate)
 
-    deduped: list[Path] = []
+    return _dedupe_paths(roots)
+
+
+def _backend_private_library_roots(spec: BackendSpec) -> list[Path]:
+    directory = spec.distribution.replace("-", "_") + ".libs"
+    return _dedupe_paths(
+        [site_root / directory for site_root in _iter_site_roots() if (site_root / directory).is_dir()]
+    )
+
+
+def _library_candidates(root: Path, selectors: tuple[str, ...]) -> list[Path]:
+    candidates: list[Path] = []
     seen: set[Path] = set()
-    for root in roots:
-        if root not in seen:
-            deduped.append(root)
-            seen.add(root)
-    return deduped
+
+    for selector in selectors:
+        if any(token in selector for token in "*?["):
+            matched = sorted(root.glob(selector))
+        else:
+            matched = [root / selector]
+
+        for path in matched:
+            if not path.is_file() or path in seen:
+                continue
+            candidates.append(path)
+            seen.add(path)
+
+    return candidates
 
 
-def _preload_shared_libraries() -> None:
+def _preload_shared_libraries(spec: BackendSpec) -> None:
     global _PRELOAD_DONE
     if _PRELOAD_DONE:
         return
 
-    candidate_groups = [
-        ("libcudart", ("libcudart.so.12", "libcudart.so")),
-        ("librapids_logger", ("librapids_logger.so",)),
-        ("librmm", ("librmm.so",)),
-        ("libraft", ("libraft.so",)),
-        ("libcuvs_c", ("libcuvs_c.so",)),
+    private_roots = set(_backend_private_library_roots(spec))
+
+    candidate_groups: list[tuple[list[Path], tuple[str, ...]]] = [
+        (
+            _cuda_library_roots(),
+            ("libcudart.so.12", "libcudart.so.12*", "libcudart.so", "libcudart.so*"),
+        )
     ]
+
+    if not private_roots:
+        candidate_groups.extend(
+            [
+                (
+                    _runtime_library_roots(),
+                    (
+                        "librapids_logger.so",
+                        "librapids_logger.so*",
+                        "librapids_logger-*.so*",
+                    ),
+                ),
+                (_runtime_library_roots(), ("librmm.so", "librmm.so*", "librmm-*.so*")),
+                (_runtime_library_roots(), ("libraft.so", "libraft.so*", "libraft-*.so*")),
+                (_runtime_library_roots(), ("libcuvs.so", "libcuvs.so*", "libcuvs-*.so*")),
+                (
+                    _runtime_library_roots(),
+                    ("libcuvs_c.so", "libcuvs_c.so*", "libcuvs_c-*.so*"),
+                ),
+            ]
+        )
+
     loaded: list[str] = []
     failures: list[str] = []
 
-    for _, names in candidate_groups:
+    for roots, selectors in candidate_groups:
         loaded_this_group = False
-        for root in _shared_library_roots():
-            paths: list[Path] = []
-            seen_paths: set[Path] = set()
-            for name in names:
-                for path in [root / name, *sorted(root.glob(f"{name}*"))]:
-                    if not path.is_file() or path in seen_paths:
-                        continue
-                    seen_paths.add(path)
-                    paths.append(path)
+        for root in roots:
+            if root in private_roots:
+                continue
 
-            for path in paths:
+            for path in _library_candidates(root, selectors):
                 try:
                     ctypes.CDLL(os.fspath(path), mode=ctypes.RTLD_GLOBAL)
                     loaded.append(os.fspath(path))
@@ -254,7 +307,7 @@ def load_backend() -> ModuleType:
         return _BACKEND
 
     spec = resolve_backend()
-    _preload_shared_libraries()
+    _preload_shared_libraries(spec)
 
     try:
         _BACKEND = importlib.import_module(spec.module)
