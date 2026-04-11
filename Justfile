@@ -55,29 +55,29 @@ rust-build: rust-fmt-check rust-clippy rust-check
   @:
 
 test-loader-wheel:
-  @root_wheel="$$(find '{{dist_dir}}' -maxdepth 1 -type f -name 'pylance_cuvs-*.whl' | head -n 1)"; \
-  test -n "$$root_wheel"; \
-  tmpdir="$$(mktemp -d)"; \
-  trap 'rm -rf "$$tmpdir"' EXIT; \
-  uv venv --python 3.12 "$$tmpdir/venv"; \
-  uv pip install --python "$$tmpdir/venv/bin/python" pytest "$$root_wheel"; \
-  "$$tmpdir/venv/bin/python" -m pytest -q tests/test_loader.py
+  @root_wheel="$(find '{{dist_dir}}' -maxdepth 1 -type f -name 'pylance_cuvs-*.whl' | head -n 1)"; \
+  test -n "$root_wheel"; \
+  tmpdir="$(mktemp -d)"; \
+  trap 'rm -rf "$tmpdir"' EXIT; \
+  uv venv --python 3.12 "$tmpdir/venv"; \
+  uv pip install --python "$tmpdir/venv/bin/python" pytest "$root_wheel"; \
+  "$tmpdir/venv/bin/python" -m pytest -q tests/test_loader.py
 
 test-gpu-wheel:
-  @root_wheel="$$(find '{{dist_dir}}' -maxdepth 1 -type f -name 'pylance_cuvs-*.whl' | head -n 1)"; \
-  backend_wheel="$$(find '{{dist_dir}}' -maxdepth 1 -type f -name 'pylance_cuvs_cu12-*.whl' | head -n 1)"; \
-  test -n "$$root_wheel"; \
-  test -n "$$backend_wheel"; \
-  tmpdir="$$(mktemp -d)"; \
-  trap 'rm -rf "$$tmpdir"' EXIT; \
-  uv venv --python 3.12 "$$tmpdir/venv"; \
-  uv pip install --python "$$tmpdir/venv/bin/python" \
+  @root_wheel="$(find '{{dist_dir}}' -maxdepth 1 -type f -name 'pylance_cuvs-*.whl' | head -n 1)"; \
+  backend_wheel="$(find '{{dist_dir}}' -maxdepth 1 -type f -name 'pylance_cuvs_cu12-*.whl' | head -n 1)"; \
+  test -n "$root_wheel"; \
+  test -n "$backend_wheel"; \
+  tmpdir="$(mktemp -d)"; \
+  trap 'rm -rf "$tmpdir"' EXIT; \
+  uv venv --python 3.12 "$tmpdir/venv"; \
+  uv pip install --python "$tmpdir/venv/bin/python" \
     pytest \
     pylance \
     libcuvs-cu12==26.2.0 \
-    "$$root_wheel" \
-    "$$backend_wheel"; \
-  LANCE_CUVS_REQUIRE_GPU="${LANCE_CUVS_REQUIRE_GPU:-1}" "$$tmpdir/venv/bin/python" -m pytest -q tests/test_smoke.py
+    "$root_wheel" \
+    "$backend_wheel"; \
+  LANCE_CUVS_REQUIRE_GPU="${LANCE_CUVS_REQUIRE_GPU:-1}" "$tmpdir/venv/bin/python" -m pytest -q tests/test_smoke.py
 
 gpu-smoke: build-wheels test-gpu-wheel
   @:
