@@ -1,14 +1,13 @@
-name: Python Wheels
+name: Python Release
 
 on:
   workflow_dispatch:
-  pull_request:
   push:
-    branches:
-      - main
+    tags:
+      - "v*"
 
 concurrency:
-  group: python-wheels-${{ github.event.pull_request.number || github.ref }}
+  group: python-release-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -58,7 +57,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: python-wheels-dist
+          name: python-release-dist
           path: dist/*
 
   test-loader-wheel:
@@ -83,7 +82,7 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: python-wheels-dist
+          name: python-release-dist
           path: dist
 
       - name: Test root wheel in a clean environment
@@ -135,10 +134,26 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: python-wheels-dist
+          name: python-release-dist
           path: dist
 
       - name: Test published wheels on a GPU runner
         env:
           LANCE_CUVS_REQUIRE_GPU: "1"
         run: just test-gpu-wheel
+
+  publish:
+    needs:
+      - test-loader-wheel
+      - test-gpu-wheel
+    runs-on: ubuntu-24.04
+    permissions:
+      id-token: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-release-dist
+          path: dist
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
