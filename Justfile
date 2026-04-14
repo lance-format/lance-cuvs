@@ -10,6 +10,12 @@ backend_wheel_compatibility := "manylinux_2_28"
 default:
   @just --list
 
+apply-release-version tag:
+  {{uv_project}} python tools/apply_release_version.py --tag {{tag}}
+
+show-release-version tag:
+  {{uv_project}} python tools/apply_release_version.py --tag {{tag}} --dry-run
+
 sync-dev:
   uv sync --group dev
 

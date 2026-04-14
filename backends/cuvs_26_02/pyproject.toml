@@ -1,6 +1,6 @@
 [project]
 name = "pylance-cuvs-cu12"
-version = "0.1.0b2"
+version = "0.0.0.dev0"
 description = "CUDA 12 runtime backend for pylance-cuvs"
 authors = [{ name = "Lance Devs", email = "dev@lance.org" }]
 license = { text = "Apache-2.0" }

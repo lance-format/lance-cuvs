@@ -3,8 +3,6 @@
 `pylance-cuvs` provides cuVS-backed IVF_PQ training and artifact building for
 Lance datasets.
 
-The current release line is `0.1.0b2`.
-
 It covers one narrow part of the indexing pipeline:
 
 1. Train an IVF_PQ model with cuVS.
@@ -33,6 +31,8 @@ same Python environment:
 - `libcuvs-cu12==26.2.0`
 
 Published beta releases are wheel-only. Source distributions are not supported.
+
+Release versions are injected from the git tag during the publish workflow.
 
 If you are working from this repository, the shortest local setup is:
 
