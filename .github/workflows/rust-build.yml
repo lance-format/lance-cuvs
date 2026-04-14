@@ -12,7 +12,6 @@ concurrency:
 
 env:
   UV_EXTRA_INDEX_URL: https://pypi.nvidia.com
-  CARGO_TARGET_DIR: /__w/lance-cuvs/lance-cuvs/backends/cuvs_26_02/target-manylinux_2_28
 
 jobs:
   rust-quality:
@@ -36,6 +35,11 @@ jobs:
 
       - name: Use bundled Python 3.12
         run: echo "/opt/python/cp312-cp312/bin" >> "$GITHUB_PATH"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            backends/cuvs_26_02 -> target
 
       - name: Check Rust formatting
         run: just rust-fmt-check

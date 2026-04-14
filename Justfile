@@ -6,8 +6,6 @@ cmake_cmd := uv_project + " python -c 'import shutil; print(shutil.which(\"cmake
 rapids_env := "export CMAKE=\"$(" + cmake_cmd + ")\"; eval \"$(" + uv_project + " python tools/rapids_env.py --format shell)\""
 dist_dir := root + "/dist"
 backend_wheel_compatibility := "manylinux_2_28"
-backend_target_dir := root + "/backends/cuvs_26_02/target-manylinux_2_28"
-backend_cargo_env := "export CARGO_TARGET_DIR=\"${CARGO_TARGET_DIR:-" + backend_target_dir + "}\""
 
 default:
   @just --list
@@ -24,10 +22,10 @@ loader-test: sync-dev
 backend-wheel: sync-dev
   rm -rf dist
   mkdir -p dist
-  {{backend_cargo_env}}; {{rapids_env}} && cd backends/cuvs_26_02 && {{uv_project}} maturin build --release --locked --compatibility {{backend_wheel_compatibility}} --auditwheel skip --out ../../dist
+  {{rapids_env}} && cd backends/cuvs_26_02 && {{uv_project}} maturin build --release --locked --compatibility {{backend_wheel_compatibility}} --auditwheel skip --out ../../dist
 
 backend-develop: sync-dev
-  {{backend_cargo_env}}; {{rapids_env}} && cd backends/cuvs_26_02 && {{uv_project}} maturin develop --release --locked
+  {{rapids_env}} && cd backends/cuvs_26_02 && {{uv_project}} maturin develop --release --locked
 
 build-wheels: sync-dev
   rm -rf dist
@@ -37,7 +35,7 @@ build-wheels: sync-dev
     python/lance_cuvs/_loader.py \
     backends/cuvs_26_02/python/lance_cuvs_backend_cu12/__init__.py
   uv build --wheel --out-dir dist
-  {{backend_cargo_env}}; {{rapids_env}} && cd backends/cuvs_26_02 && {{uv_project}} maturin build --release --locked --compatibility {{backend_wheel_compatibility}} --auditwheel skip --out ../../dist
+  {{rapids_env}} && cd backends/cuvs_26_02 && {{uv_project}} maturin build --release --locked --compatibility {{backend_wheel_compatibility}} --auditwheel skip --out ../../dist
 
 python-build: build-wheels test-loader-wheel
   @:
@@ -49,10 +47,10 @@ rust-fmt-check:
   cargo fmt --manifest-path backends/cuvs_26_02/Cargo.toml --all --check
 
 rust-clippy: sync-dev-no-project
-  {{backend_cargo_env}}; {{rapids_env}} && cargo clippy --manifest-path backends/cuvs_26_02/Cargo.toml --locked --all-targets --features python -- -D warnings
+  {{rapids_env}} && cargo clippy --manifest-path backends/cuvs_26_02/Cargo.toml --locked --all-targets --features python -- -D warnings
 
 rust-check: sync-dev-no-project
-  {{backend_cargo_env}}; {{rapids_env}} && cargo check --manifest-path backends/cuvs_26_02/Cargo.toml --locked --all-targets --features python
+  {{rapids_env}} && cargo check --manifest-path backends/cuvs_26_02/Cargo.toml --locked --all-targets --features python
 
 rust-build: rust-fmt-check rust-clippy rust-check
   @:
