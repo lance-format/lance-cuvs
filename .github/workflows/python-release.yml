@@ -14,7 +14,7 @@ env:
   UV_EXTRA_INDEX_URL: https://pypi.nvidia.com
 
 jobs:
-  build-dist:
+  build-wheels:
     runs-on: ubuntu-24.04
     container:
       image: nvidia/cuda:12.9.1-devel-ubuntu24.04
@@ -52,8 +52,8 @@ jobs:
           workspaces: |
             backends/cuvs_26_02 -> target
 
-      - name: Build Python distributions
-        run: just python-release
+      - name: Build release wheels
+        run: just build-wheels
 
       - uses: actions/upload-artifact@v4
         with:
@@ -61,7 +61,8 @@ jobs:
           path: dist/*
 
   publish:
-    needs: build-dist
+    needs:
+      - build-wheels
     runs-on: ubuntu-24.04
     permissions:
       id-token: write

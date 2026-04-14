@@ -120,6 +120,7 @@ fn parse_distance_type(metric: &str) -> PyResult<DistanceType> {
 )]
 #[pyo3(name = "train_ivf_pq")]
 /// Train an IVF_PQ model and return Arrow-native training outputs.
+#[allow(clippy::too_many_arguments)]
 fn train_ivf_pq_py(
     py: Python<'_>,
     dataset_uri: &str,
@@ -175,6 +176,7 @@ fn train_ivf_pq_py(
     )
 )]
 /// Encode a dataset into a partition-local IVF_PQ artifact.
+#[allow(clippy::too_many_arguments)]
 fn build_ivf_pq_artifact<'py>(
     py: Python<'py>,
     dataset_uri: &str,

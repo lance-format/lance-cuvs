@@ -1,4 +1,4 @@
-name: Rust Build
+name: Rust Quality
 
 on:
   pull_request:
@@ -14,7 +14,7 @@ env:
   UV_EXTRA_INDEX_URL: https://pypi.nvidia.com
 
 jobs:
-  rust-build:
+  rust-quality:
     runs-on: ubuntu-24.04
     container:
       image: nvidia/cuda:12.9.1-devel-ubuntu24.04
@@ -38,6 +38,8 @@ jobs:
             protobuf-compiler
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
 
       - uses: astral-sh/setup-uv@v6
         with:
@@ -51,5 +53,11 @@ jobs:
           workspaces: |
             backends/cuvs_26_02 -> target
 
-      - name: Run Rust build
-        run: just rust-build
+      - name: Check Rust formatting
+        run: just rust-fmt-check
+
+      - name: Run Clippy
+        run: just rust-clippy
+
+      - name: Run cargo check
+        run: just rust-check

@@ -29,6 +29,8 @@ same Python environment:
 - `pylance-cuvs-cu12`
 - `libcuvs-cu12==26.2.0`
 
+Published releases are wheel-only. Source builds are not supported.
+
 If you are working from this repository, the shortest local setup is:
 
 ```bash
@@ -157,13 +159,13 @@ Run the CI-equivalent CPU build locally with:
 just container-python-build
 ```
 
-Run the Rust-only build locally with:
+Run the Rust quality gates locally with:
 
 ```bash
 just container-rust-build
 ```
 
-Build all release artifacts locally with:
+Build all release wheels locally with:
 
 ```bash
 just container-python-release
@@ -181,13 +183,25 @@ Run loader-only tests with:
 just loader-test
 ```
 
-Build the root wheel with:
+Build the root and backend wheels with:
 
 ```bash
-just python-build
+just build-wheels
 ```
 
-Build the backend wheel with:
+Test the published root wheel in a clean environment with:
+
+```bash
+just test-loader-wheel
+```
+
+Test the published wheels on a GPU-capable machine with:
+
+```bash
+just test-gpu-wheel
+```
+
+Build only the backend wheel with:
 
 ```bash
 just backend-wheel
@@ -199,16 +213,28 @@ Build the `cu12` backend in-place with:
 just backend-develop
 ```
 
-Build the release distributions with:
+Run the Rust formatting check with:
 
 ```bash
-just python-release
+just rust-fmt-check
 ```
 
-Run the Python smoke on a GPU-capable machine with:
+Run Clippy with the Python bindings enabled:
 
 ```bash
-just container-gpu-smoke
+just rust-clippy
+```
+
+Run cargo check with the Python bindings enabled:
+
+```bash
+just rust-check
+```
+
+Run the release-style GPU smoke end to end with:
+
+```bash
+just gpu-smoke
 ```
 
 ## Repository Layout
