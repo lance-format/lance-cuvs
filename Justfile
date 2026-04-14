@@ -5,6 +5,7 @@ uv_project := "uv run --project '" + root + "' --no-sync"
 cmake_cmd := uv_project + " python -c 'import shutil; print(shutil.which(\"cmake\") or \"\")'"
 rapids_env := "export CMAKE=\"$(" + cmake_cmd + ")\"; eval \"$(" + uv_project + " python tools/rapids_env.py --format shell)\""
 dist_dir := root + "/dist"
+backend_wheel_compatibility := "manylinux_2_28"
 
 default:
   @just --list
@@ -21,7 +22,7 @@ loader-test: sync-dev
 backend-wheel: sync-dev
   rm -rf dist
   mkdir -p dist
-  {{rapids_env}} && cd backends/cuvs_26_02 && {{uv_project}} maturin build --release --locked --compatibility linux --auditwheel skip --out ../../dist
+  {{rapids_env}} && cd backends/cuvs_26_02 && {{uv_project}} maturin build --release --locked --compatibility {{backend_wheel_compatibility}} --auditwheel skip --out ../../dist
 
 backend-develop: sync-dev
   {{rapids_env}} && cd backends/cuvs_26_02 && {{uv_project}} maturin develop --release --locked
@@ -34,7 +35,7 @@ build-wheels: sync-dev
     python/lance_cuvs/_loader.py \
     backends/cuvs_26_02/python/lance_cuvs_backend_cu12/__init__.py
   uv build --wheel --out-dir dist
-  {{rapids_env}} && cd backends/cuvs_26_02 && {{uv_project}} maturin build --release --locked --compatibility linux --auditwheel skip --out ../../dist
+  {{rapids_env}} && cd backends/cuvs_26_02 && {{uv_project}} maturin build --release --locked --compatibility {{backend_wheel_compatibility}} --auditwheel skip --out ../../dist
 
 python-build: build-wheels test-loader-wheel
   @:
