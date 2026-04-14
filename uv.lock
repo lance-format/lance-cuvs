@@ -454,7 +454,7 @@ wheels = [
 
 [[package]]
 name = "pylance-cuvs"
-version = "0.1.0b2"
+version = "0.0.0.dev0"
 source = { editable = "." }
 dependencies = [
     { name = "pyarrow" },

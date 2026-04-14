@@ -1,6 +1,6 @@
 [project]
 name = "pylance-cuvs"
-version = "0.1.0b2"
+version = "0.0.0.dev0"
 description = "Version-dispatched cuVS backend loader for Lance"
 authors = [{ name = "Lance Devs", email = "dev@lance.org" }]
 license = { file = "LICENSE" }
