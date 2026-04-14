@@ -21,7 +21,7 @@ loader-test: sync-dev
 backend-wheel: sync-dev
   rm -rf dist
   mkdir -p dist
-  {{rapids_env}} && cd backends/cuvs_26_02 && {{uv_project}} maturin build --release --locked --out ../../dist
+  {{rapids_env}} && cd backends/cuvs_26_02 && {{uv_project}} maturin build --release --locked --compatibility linux --auditwheel skip --out ../../dist
 
 backend-develop: sync-dev
   {{rapids_env}} && cd backends/cuvs_26_02 && {{uv_project}} maturin develop --release --locked
@@ -34,7 +34,7 @@ build-wheels: sync-dev
     python/lance_cuvs/_loader.py \
     backends/cuvs_26_02/python/lance_cuvs_backend_cu12/__init__.py
   uv build --wheel --out-dir dist
-  {{rapids_env}} && cd backends/cuvs_26_02 && {{uv_project}} maturin build --release --locked --out ../../dist
+  {{rapids_env}} && cd backends/cuvs_26_02 && {{uv_project}} maturin build --release --locked --compatibility linux --auditwheel skip --out ../../dist
 
 python-build: build-wheels test-loader-wheel
   @:
@@ -74,11 +74,10 @@ test-gpu-wheel:
   uv pip install --python "$tmpdir/venv/bin/python" \
     pytest \
     pylance \
+    libcuvs-cu12==26.2.0 \
     "$root_wheel" \
     "$backend_wheel"; \
-  LANCE_CUVS_BACKEND=cu12 \
-  LANCE_CUVS_REQUIRE_GPU="${LANCE_CUVS_REQUIRE_GPU:-1}" \
-  "$tmpdir/venv/bin/python" -m pytest -q tests/test_smoke.py
+  LANCE_CUVS_REQUIRE_GPU="${LANCE_CUVS_REQUIRE_GPU:-1}" "$tmpdir/venv/bin/python" -m pytest -q tests/test_smoke.py
 
 gpu-smoke: build-wheels test-gpu-wheel
   @:
