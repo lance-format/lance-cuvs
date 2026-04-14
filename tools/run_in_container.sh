@@ -69,6 +69,7 @@ docker "${DOCKER_ARGS[@]}" \
   bash -lc '
     set -euo pipefail
     export PATH=/root/.cargo/bin:/root/.local/bin:/opt/python/cp312-cp312/bin:$PATH
+    export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/work/backends/cuvs_26_02/target-manylinux_2_28}"
     /work/tools/bootstrap_build_env.sh
     exec "$@"
   ' bash "$@"
