@@ -3,6 +3,8 @@
 `pylance-cuvs` provides cuVS-backed IVF_PQ training and artifact building for
 Lance datasets.
 
+The current release line is `0.1.0b1`.
+
 It covers one narrow part of the indexing pipeline:
 
 1. Train an IVF_PQ model with cuVS.
@@ -18,7 +20,8 @@ It does **not** create or register a Lance index on your behalf.
 - CUDA 12 runtime available on the machine
 - cuVS runtime `libcuvs-cu12==26.2.0`
 - A matching backend package: `pylance-cuvs-cu12`
-- A Lance build that includes the vector-build APIs used by this project
+- A Lance build at commit `6112a34bfe38618f07c099217dc3d89fd39ca6bb`
+  or a descendant that preserves the same vector-build APIs
 
 ## Installation
 
@@ -29,7 +32,7 @@ same Python environment:
 - `pylance-cuvs-cu12`
 - `libcuvs-cu12==26.2.0`
 
-Published releases are wheel-only. Source builds are not supported.
+Published beta releases are wheel-only. Source distributions are not supported.
 
 If you are working from this repository, the shortest local setup is:
 
@@ -37,6 +40,10 @@ If you are working from this repository, the shortest local setup is:
 just sync-dev
 just backend-develop
 ```
+
+For Lance-side integration, pin Lance to commit
+`6112a34bfe38618f07c099217dc3d89fd39ca6bb` first, then validate against this
+beta.
 
 The loader chooses the backend from the installed cuVS runtime package. You can
 override detection when needed:
