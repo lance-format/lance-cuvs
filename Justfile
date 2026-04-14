@@ -5,7 +5,7 @@ uv_project := "uv run --project '" + root + "' --no-sync"
 cmake_cmd := uv_project + " python -c 'import shutil; print(shutil.which(\"cmake\") or \"\")'"
 rapids_env := "export CMAKE=\"$(" + cmake_cmd + ")\"; eval \"$(" + uv_project + " python tools/rapids_env.py --format shell)\""
 dist_dir := root + "/dist"
-backend_wheel_compatibility := "manylinux_2_39"
+backend_wheel_compatibility := "manylinux_2_28"
 
 default:
   @just --list

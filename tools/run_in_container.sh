@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-IMAGE_TAG="${LANCE_CUVS_CONTAINER_IMAGE:-nvidia/cuda:12.9.1-devel-ubuntu24.04}"
+IMAGE_TAG="${LANCE_CUVS_CONTAINER_IMAGE:-quay.io/pypa/manylinux_2_28_x86_64}"
 PLATFORM="${LANCE_CUVS_CONTAINER_PLATFORM:-}"
 GPU_ARGS=()
 TTY_ARGS=()
@@ -68,30 +68,7 @@ docker "${DOCKER_ARGS[@]}" \
   "$IMAGE_TAG" \
   bash -lc '
     set -euo pipefail
-    export PATH=/root/.cargo/bin:/root/.local/bin:$PATH
-    export DEBIAN_FRONTEND=noninteractive
-    apt-get update
-    apt-get install -y --no-install-recommends \
-      bash \
-      build-essential \
-      ca-certificates \
-      clang \
-      cmake \
-      curl \
-      git \
-      just \
-      libprotobuf-dev \
-      libssl-dev \
-      patchelf \
-      pkg-config \
-      protobuf-compiler
-    if ! command -v cargo >/dev/null 2>&1; then
-      curl -LsSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-      rustup toolchain install stable
-    fi
-    if ! command -v uv >/dev/null 2>&1; then
-      curl -LsSf https://astral.sh/uv/install.sh | sh
-    fi
-    uv python install 3.12
+    export PATH=/root/.cargo/bin:/root/.local/bin:/opt/python/cp312-cp312/bin:$PATH
+    /work/tools/bootstrap_build_env.sh
     exec "$@"
   ' bash "$@"
