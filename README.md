@@ -3,7 +3,7 @@
 `pylance-cuvs` provides cuVS-backed IVF_PQ training and artifact building for
 Lance datasets.
 
-The current release line is `0.1.0b1`.
+The current release line is `0.1.0b2`.
 
 It covers one narrow part of the indexing pipeline:
 
