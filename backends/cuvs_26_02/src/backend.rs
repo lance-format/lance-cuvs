@@ -2,40 +2,34 @@
 // SPDX-FileCopyrightText: Copyright The Lance Authors
 
 use crate::cuda::{
-    CudaEvent, CuvsIvfPqIndex, DeviceTensor, HostTensorView, PinnedHostBuffer, check_cuvs,
-    copy_tensor_to_host_f32_2d, copy_tensor_to_host_f32_3d, create_index_params,
-    destroy_index_params, ivf_centroids_from_host, make_tensor_view, matrix_from_vectors,
-    pq_codebook_from_host,
+    CudaEvent, CuvsIvfPqIndex, DeviceTensor, HostTensorView, MatrixBuffer, PinnedHostBuffer,
+    RegisteredHostBuffer, check_cuvs, copy_tensor_to_host_f32_2d, copy_tensor_to_host_f32_3d,
+    create_index_params, destroy_index_params, ivf_centroids_from_host, make_tensor_view,
+    matrix_from_vectors, pq_codebook_from_host,
 };
 use arrow::compute::filter;
 use arrow_array::cast::AsArray;
-use arrow_array::{
-    Array, ArrayRef, FixedSizeListArray, ListArray, RecordBatch, UInt8Array, UInt32Array,
-};
-use arrow_buffer::{OffsetBuffer, ScalarBuffer};
+use arrow_array::{Array, ArrayRef, FixedSizeListArray, RecordBatch, UInt8Array, UInt32Array};
 use arrow_schema::{DataType, Field, Schema as ArrowSchema};
 use cuvs::Resources;
-use futures::{FutureExt, SinkExt, TryStreamExt, channel::mpsc, future::LocalBoxFuture};
+use futures::{FutureExt, SinkExt, StreamExt, TryStreamExt, channel::mpsc, future::LocalBoxFuture};
 use lance::dataset::Dataset;
+use lance::index::vector::PartitionArtifactBuilder;
 use lance::index::vector::utils::infer_vector_dim;
 use lance_arrow::FixedSizeListArrayExt;
 use lance_core::{Error, ROW_ID, Result};
-use lance_file::version::LanceFileVersion;
-use lance_file::writer::{FileWriter, FileWriterOptions};
-use lance_index::vector::ivf::shuffler::IvfShuffler;
 use lance_index::vector::utils::is_finite;
 use lance_index::vector::{PART_ID_COLUMN, PQ_CODE_COLUMN};
-use lance_io::local::to_local_path;
 use lance_linalg::distance::DistanceType;
 use log::warn;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 const PARTITION_ARTIFACT_METADATA_FILE_NAME: &str = "metadata.lance";
-const PARTITION_ARTIFACT_FILE_VERSION: &str = "2.2";
-const PARTITION_ARTIFACT_UNSORTED_FILE_NAME: &str = "unsorted.lance";
-const PARTITION_ARTIFACT_SHUFFLE_BATCHES_PER_FILE: usize = 16;
 const PIPELINE_SLOTS: usize = 2;
+const DEFAULT_SCAN_FRAGMENT_READAHEAD: usize = 64;
+const DEFAULT_SCAN_IO_BUFFER_SIZE: u64 = 16 * 1024 * 1024 * 1024;
 
 /// A trained cuVS IVF_PQ model that can be reused for artifact builds.
 ///
@@ -183,6 +177,7 @@ impl VectorBuildBackend for CuvsVectorBuildBackend {
         async move {
             match params.kind {
                 VectorIndexKind::IvfPq(build_params) => {
+                    let train_start = Instant::now();
                     let trained = train_ivf_pq(
                         dataset,
                         &params.column,
@@ -195,6 +190,11 @@ impl VectorBuildBackend for CuvsVectorBuildBackend {
                         params.filter_nan,
                     )
                     .await?;
+                    eprintln!(
+                        "cuVS train_ivf_pq time: {:.3}s",
+                        train_start.elapsed().as_secs_f64()
+                    );
+                    let artifact_start = Instant::now();
                     let files = assign_ivf_pq_to_artifact(
                         dataset,
                         &params.column,
@@ -205,6 +205,11 @@ impl VectorBuildBackend for CuvsVectorBuildBackend {
                         None,
                     )
                     .await?;
+                    eprintln!(
+                        "cuVS assign_ivf_pq_to_artifact time: {:.3}s files={}",
+                        artifact_start.elapsed().as_secs_f64(),
+                        files.len()
+                    );
                     Ok(VectorIndexBuildOutput::PartitionArtifact(
                         PartitionArtifactBuildOutput {
                             artifact_uri: params.artifact_uri,
@@ -286,116 +291,6 @@ fn vector_column_to_fsl(batch: &RecordBatch, column: &str) -> Result<FixedSizeLi
     }
 }
 
-fn build_metadata_batch(
-    ivf_centroids: &FixedSizeListArray,
-    pq_codebook: &FixedSizeListArray,
-) -> Result<RecordBatch> {
-    let ivf_offsets = OffsetBuffer::new(ScalarBuffer::from(vec![0i32, ivf_centroids.len() as i32]));
-    let pq_offsets = OffsetBuffer::new(ScalarBuffer::from(vec![0i32, pq_codebook.len() as i32]));
-    let ivf_list = ListArray::new(
-        Arc::new(Field::new(
-            "_ivf_centroids_item",
-            ivf_centroids.data_type().clone(),
-            false,
-        )),
-        ivf_offsets,
-        Arc::new(ivf_centroids.clone()),
-        None,
-    );
-    let pq_list = ListArray::new(
-        Arc::new(Field::new(
-            "_pq_codebook_item",
-            pq_codebook.data_type().clone(),
-            false,
-        )),
-        pq_offsets,
-        Arc::new(pq_codebook.clone()),
-        None,
-    );
-    let schema = Arc::new(ArrowSchema::new(vec![
-        Field::new("_ivf_centroids", ivf_list.data_type().clone(), false),
-        Field::new("_pq_codebook", pq_list.data_type().clone(), false),
-    ]));
-    Ok(RecordBatch::try_new(
-        schema,
-        vec![Arc::new(ivf_list), Arc::new(pq_list)],
-    )?)
-}
-
-fn metadata_writer_options() -> Result<FileWriterOptions> {
-    Ok(FileWriterOptions {
-        format_version: Some(
-            PARTITION_ARTIFACT_FILE_VERSION
-                .parse::<LanceFileVersion>()
-                .map_err(|error| {
-                    Error::invalid_input(format!(
-                        "invalid partition artifact file version '{}': {}",
-                        PARTITION_ARTIFACT_FILE_VERSION, error
-                    ))
-                })?,
-        ),
-        ..Default::default()
-    })
-}
-
-async fn write_partition_artifact_metadata(
-    artifact_uri: &str,
-    trained: &TrainedIvfPqIndex,
-    storage_options: Option<&HashMap<String, String>>,
-) -> Result<()> {
-    let registry = Arc::new(lance_io::object_store::ObjectStoreRegistry::default());
-    let params = if let Some(storage_options) = storage_options {
-        lance_io::object_store::ObjectStoreParams {
-            storage_options_accessor: Some(Arc::new(
-                lance_io::object_store::StorageOptionsAccessor::with_static_options(
-                    storage_options.clone(),
-                ),
-            )),
-            ..Default::default()
-        }
-    } else {
-        lance_io::object_store::ObjectStoreParams::default()
-    };
-    let (object_store, root_dir) =
-        lance::io::ObjectStore::from_uri_and_params(registry, artifact_uri, &params)
-            .await
-            .map_err(|error| Error::io(error.to_string()))?;
-    let path = root_dir.child(PARTITION_ARTIFACT_METADATA_FILE_NAME);
-    let batch = build_metadata_batch(&trained.ivf_centroids, &trained.pq_codebook)?;
-    let mut writer = FileWriter::try_new(
-        object_store.create(&path).await?,
-        lance_core::datatypes::Schema::try_from(batch.schema().as_ref())?,
-        metadata_writer_options()?,
-    )?;
-    writer.add_schema_metadata(
-        "lance:index_build:artifact_version".to_string(),
-        "1".to_string(),
-    );
-    writer.add_schema_metadata(
-        "lance:index_build:distance_type".to_string(),
-        trained.metric_type.to_string(),
-    );
-    writer.add_schema_metadata(
-        "lance:index_build:num_partitions".to_string(),
-        trained.num_partitions.to_string(),
-    );
-    writer.add_schema_metadata(
-        "lance:index_build:num_sub_vectors".to_string(),
-        trained.num_sub_vectors.to_string(),
-    );
-    writer.add_schema_metadata(
-        "lance:index_build:num_bits".to_string(),
-        trained.num_bits.to_string(),
-    );
-    writer.add_schema_metadata(
-        "lance:index_build:dimension".to_string(),
-        trained.dimension.to_string(),
-    );
-    writer.write_batch(&batch).await?;
-    writer.finish().await?;
-    Ok(())
-}
-
 fn build_partition_batch(
     row_ids: Arc<dyn Array>,
     partitions: &[u32],
@@ -438,7 +333,6 @@ fn build_partition_batch(
 }
 
 struct TransformSlot {
-    input_host: PinnedHostBuffer<f32>,
     input_device: DeviceTensor<f32>,
     labels_host: PinnedHostBuffer<u32>,
     labels_device: DeviceTensor<u32>,
@@ -448,8 +342,29 @@ struct TransformSlot {
     h2d_done: CudaEvent,
     transform_done: CudaEvent,
     output_ready: CudaEvent,
+    input_vectors: Option<FixedSizeListArray>,
+    input_registration: Option<RegisteredHostBuffer>,
     row_ids: Option<Arc<dyn Array>>,
     rows: usize,
+}
+
+struct PreparedTransformBatch {
+    row_ids: Arc<dyn Array>,
+    vectors: FixedSizeListArray,
+    input_registration: Option<RegisteredHostBuffer>,
+}
+
+#[derive(Default)]
+struct ArtifactPrepareStats {
+    input_batches: usize,
+    input_rows: usize,
+    scan_wait: Duration,
+    send: Duration,
+    vector: Duration,
+    filter: Duration,
+    matrix: Duration,
+    register: Duration,
+    registered_bytes: usize,
 }
 
 impl TransformSlot {
@@ -460,7 +375,6 @@ impl TransformSlot {
         code_width: usize,
     ) -> Result<Self> {
         Ok(Self {
-            input_host: PinnedHostBuffer::try_new(max_rows * dimension)?,
             input_device: DeviceTensor::try_new(resources, &[max_rows, dimension])?,
             labels_host: PinnedHostBuffer::try_new(max_rows)?,
             labels_device: DeviceTensor::try_new(resources, &[max_rows])?,
@@ -470,6 +384,8 @@ impl TransformSlot {
             h2d_done: CudaEvent::try_new()?,
             transform_done: CudaEvent::try_new()?,
             output_ready: CudaEvent::try_new()?,
+            input_vectors: None,
+            input_registration: None,
             row_ids: None,
             rows: 0,
         })
@@ -483,25 +399,41 @@ impl TransformSlot {
         &mut self,
         trained: &TrainedIvfPqIndex,
         stream: cuvs_sys::cudaStream_t,
-        row_ids: Arc<dyn Array>,
-        matrix: &[f32],
-        rows: usize,
-        dimension: usize,
+        prepared: PreparedTransformBatch,
     ) -> Result<()> {
         let code_width = trained.pq_code_width();
-        self.input_host.copy_from_slice(matrix)?;
+        let row_ids = prepared.row_ids;
+        let vectors = prepared.vectors;
+        let matrix = matrix_from_vectors(&vectors)?;
+        let (input_slice, rows, dimension, keep_input_vectors) = match &matrix {
+            MatrixBuffer::Borrowed { values, rows, cols } => (*values, *rows, *cols, true),
+            MatrixBuffer::Owned(array) => (
+                array
+                    .as_slice_memory_order()
+                    .ok_or_else(|| Error::io("transform matrix is not contiguous"))?,
+                array.nrows(),
+                array.ncols(),
+                false,
+            ),
+        };
+
         self.input_device.set_shape(&[rows, dimension])?;
         self.labels_device.set_shape(&[rows])?;
         self.codes_device.set_shape(&[rows, code_width])?;
         self.rows = rows;
         self.row_ids = Some(row_ids);
+        self.input_registration = prepared.input_registration;
 
         self.h2d_start.record(stream)?;
-        self.input_device.copy_from_host_async(
-            &trained.resources,
-            self.input_host.prefix(rows * dimension)?,
-        )?;
+        self.input_device
+            .copy_from_host_async(&trained.resources, input_slice)?;
         self.h2d_done.record(stream)?;
+        if keep_input_vectors {
+            self.input_vectors = Some(vectors);
+        } else {
+            self.h2d_done.synchronize()?;
+            self.input_vectors = None;
+        }
         check_cuvs(
             unsafe {
                 cuvs_sys::cuvsIvfPqTransform(
@@ -531,6 +463,8 @@ impl TransformSlot {
         }
 
         self.output_ready.synchronize()?;
+        self.input_registration = None;
+        self.input_vectors = None;
         let row_ids = self
             .row_ids
             .take()
@@ -546,31 +480,212 @@ impl TransformSlot {
     }
 }
 
-async fn for_each_transformed_batch<F, Fut>(
-    dataset: &Dataset,
-    column: &str,
-    trained: &TrainedIvfPqIndex,
+#[derive(Default)]
+struct ArtifactBuildStats {
+    input_batches: usize,
+    input_rows: usize,
+    output_batches: usize,
+    output_rows: usize,
+    scan_wait: Duration,
+    drain: Duration,
+    send: Duration,
+    prepare_send: Duration,
+    vector: Duration,
+    filter: Duration,
+    matrix: Duration,
+    launch: Duration,
+    register: Duration,
+    registered_bytes: usize,
+}
+
+impl ArtifactBuildStats {
+    fn merge_prepare(&mut self, prepare: ArtifactPrepareStats) {
+        self.input_batches += prepare.input_batches;
+        self.input_rows += prepare.input_rows;
+        self.scan_wait += prepare.scan_wait;
+        self.prepare_send += prepare.send;
+        self.vector += prepare.vector;
+        self.filter += prepare.filter;
+        self.matrix += prepare.matrix;
+        self.register += prepare.register;
+        self.registered_bytes += prepare.registered_bytes;
+    }
+
+    fn record_output(&mut self, batch: &RecordBatch) {
+        self.output_batches += 1;
+        self.output_rows += batch.num_rows();
+    }
+
+    fn log(&self) {
+        eprintln!(
+            "cuVS artifact stages: input_batches={} input_rows={} output_batches={} output_rows={} scan_wait_s={:.3} drain_s={:.3} send_s={:.3} prepare_send_s={:.3} vector_s={:.3} filter_s={:.3} matrix_s={:.3} launch_s={:.3}",
+            self.input_batches,
+            self.input_rows,
+            self.output_batches,
+            self.output_rows,
+            secs(self.scan_wait),
+            secs(self.drain),
+            secs(self.send),
+            secs(self.prepare_send),
+            secs(self.vector),
+            secs(self.filter),
+            secs(self.matrix),
+            secs(self.launch),
+        );
+        eprintln!(
+            "cuVS artifact h2d registration: register_s={:.3} registered_gib={:.3}",
+            secs(self.register),
+            self.registered_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+        );
+    }
+}
+
+fn secs(duration: Duration) -> f64 {
+    duration.as_secs_f64()
+}
+
+async fn prepare_transform_batches(
+    dataset: Dataset,
+    column: String,
     batch_size: usize,
     filter_nan: bool,
-    mut on_batch: F,
-) -> Result<()>
-where
-    F: FnMut(RecordBatch) -> Fut,
-    Fut: std::future::Future<Output = Result<()>>,
-{
-    let code_width = trained.pq_code_width();
+    mut prepared_tx: mpsc::Sender<PreparedTransformBatch>,
+) -> Result<ArtifactPrepareStats> {
     let mut scanner = dataset.scan();
-    scanner.project(&[column])?;
+    scanner.project(&[&column])?;
     if dataset
         .schema()
-        .field(column)
+        .field(&column)
         .is_some_and(|field| field.nullable && filter_nan)
     {
         scanner.filter(&format!("{column} is not null"))?;
     }
     scanner.with_row_id();
     scanner.batch_size(batch_size);
+    scanner.scan_in_order(false);
+    scanner.fragment_readahead(DEFAULT_SCAN_FRAGMENT_READAHEAD);
+    scanner.io_buffer_size(DEFAULT_SCAN_IO_BUFFER_SIZE);
     let mut stream = scanner.try_into_stream().await?;
+    let mut stats = ArtifactPrepareStats::default();
+
+    loop {
+        let scan_start = Instant::now();
+        let Some(batch) = stream.try_next().await? else {
+            stats.scan_wait += scan_start.elapsed();
+            break;
+        };
+        stats.scan_wait += scan_start.elapsed();
+        stats.input_batches += 1;
+        stats.input_rows += batch.num_rows();
+
+        let vector_start = Instant::now();
+        let vectors = vector_column_to_fsl(&batch, &column)?;
+        let row_ids = batch
+            .column_by_name(ROW_ID)
+            .ok_or_else(|| Error::invalid_input(format!("transform batch is missing {ROW_ID}")))?;
+        stats.vector += vector_start.elapsed();
+
+        let filter_start = Instant::now();
+        let (filtered_row_ids, filtered_vectors) = if filter_nan {
+            let finite_mask = is_finite(&vectors);
+            let valid_rows = finite_mask.true_count();
+            if valid_rows == 0 {
+                continue;
+            }
+            if valid_rows != vectors.len() {
+                warn!(
+                    "{} vectors are ignored during partition assignment because they are null or non-finite",
+                    vectors.len() - valid_rows
+                );
+            }
+
+            let filtered_row_ids = if valid_rows == row_ids.len() {
+                row_ids.clone()
+            } else {
+                filter(row_ids.as_ref(), &finite_mask)?
+            };
+            let filtered_vectors = if valid_rows == vectors.len() {
+                vectors
+            } else {
+                let vector_column = batch.column_by_name(&column).ok_or_else(|| {
+                    Error::invalid_input(format!(
+                        "transform batch is missing vector column '{column}'"
+                    ))
+                })?;
+                let field = batch
+                    .schema()
+                    .field_with_name(&column)
+                    .map_err(|_| {
+                        Error::invalid_input(format!(
+                            "transform batch schema is missing field '{column}'"
+                        ))
+                    })?
+                    .clone();
+                let filtered_vectors = filter(vector_column.as_ref(), &finite_mask)?;
+                vector_column_to_fsl(
+                    &RecordBatch::try_new(
+                        Arc::new(ArrowSchema::new(vec![field])),
+                        vec![filtered_vectors],
+                    )?,
+                    &column,
+                )?
+            };
+            (filtered_row_ids, filtered_vectors)
+        } else {
+            (row_ids.clone(), vectors)
+        };
+        stats.filter += filter_start.elapsed();
+
+        let matrix_start = Instant::now();
+        let matrix = matrix_from_vectors(&filtered_vectors)?;
+        let input_registration = match &matrix {
+            MatrixBuffer::Borrowed { values, .. } => {
+                let register_start = Instant::now();
+                let registration = match RegisteredHostBuffer::try_new(values) {
+                    Ok(registration) => Some(registration),
+                    Err(error) => {
+                        warn!(
+                            "failed to register host vector buffer for CUDA H2D; falling back to pageable memory: {error}"
+                        );
+                        None
+                    }
+                };
+                stats.register += register_start.elapsed();
+                stats.registered_bytes += registration
+                    .as_ref()
+                    .map(RegisteredHostBuffer::original_bytes)
+                    .unwrap_or_default();
+                registration
+            }
+            MatrixBuffer::Owned(_) => None,
+        };
+        stats.matrix += matrix_start.elapsed();
+
+        let prepared = PreparedTransformBatch {
+            row_ids: filtered_row_ids,
+            vectors: filtered_vectors,
+            input_registration,
+        };
+        let send_start = Instant::now();
+        prepared_tx
+            .send(prepared)
+            .await
+            .map_err(|error| Error::io(format!("failed to forward prepared batch: {error}")))?;
+        stats.send += send_start.elapsed();
+    }
+
+    Ok(stats)
+}
+
+async fn append_transformed_batches_to_artifact(
+    dataset: &Dataset,
+    column: &str,
+    trained: &TrainedIvfPqIndex,
+    batch_size: usize,
+    filter_nan: bool,
+    append_tx: &mut mpsc::Sender<Result<RecordBatch>>,
+) -> Result<()> {
+    let code_width = trained.pq_code_width();
     let cuda_stream = trained
         .resources
         .get_cuda_stream()
@@ -586,87 +701,94 @@ where
         })
         .collect::<Result<Vec<_>>>()?;
     let mut next_slot = 0usize;
+    let mut stats = ArtifactBuildStats::default();
+    let (prepared_tx, mut prepared_rx) = mpsc::channel::<PreparedTransformBatch>(PIPELINE_SLOTS);
+    let prepare_task = tokio::spawn(prepare_transform_batches(
+        dataset.clone(),
+        column.to_string(),
+        batch_size,
+        filter_nan,
+        prepared_tx,
+    ));
 
-    loop {
-        let Some(batch) = stream.try_next().await? else {
-            break;
-        };
+    while let Some(prepared) = prepared_rx.next().await {
         let slot = &mut slots[next_slot];
-        if let Some(transformed) = slot.drain_to_batch(code_width)? {
-            on_batch(transformed).await?;
-        }
-
-        let vectors = vector_column_to_fsl(&batch, column)?;
-        let row_ids = batch
-            .column_by_name(ROW_ID)
-            .ok_or_else(|| Error::invalid_input(format!("transform batch is missing {ROW_ID}")))?;
-        let finite_mask = is_finite(&vectors);
-        let valid_rows = finite_mask.true_count();
-        if valid_rows == 0 {
-            continue;
-        }
-        if valid_rows != vectors.len() {
-            warn!(
-                "{} vectors are ignored during partition assignment because they are null or non-finite",
-                vectors.len() - valid_rows
-            );
-        }
-
-        let filtered_row_ids = if valid_rows == row_ids.len() {
-            row_ids.clone()
+        let drain_start = Instant::now();
+        let transformed = if let Some(transformed) = slot.drain_to_batch(code_width)? {
+            stats.drain += drain_start.elapsed();
+            stats.record_output(&transformed);
+            Some(transformed)
         } else {
-            filter(row_ids.as_ref(), &finite_mask)?
+            stats.drain += drain_start.elapsed();
+            None
         };
-        let filtered_vectors = if valid_rows == vectors.len() {
-            vectors
-        } else {
-            let vector_column = batch.column_by_name(column).ok_or_else(|| {
-                Error::invalid_input(format!(
-                    "transform batch is missing vector column '{column}'"
-                ))
+
+        let launch_start = Instant::now();
+        slot.launch(trained, cuda_stream, prepared)?;
+        stats.launch += launch_start.elapsed();
+
+        if let Some(transformed) = transformed {
+            let send_start = Instant::now();
+            append_tx.send(Ok(transformed)).await.map_err(|error| {
+                Error::io(format!("failed to forward transformed batch: {error}"))
             })?;
-            let field = batch
-                .schema()
-                .field_with_name(column)
-                .map_err(|_| {
-                    Error::invalid_input(format!(
-                        "transform batch schema is missing field '{column}'"
-                    ))
-                })?
-                .clone();
-            let filtered_vectors = filter(vector_column.as_ref(), &finite_mask)?;
-            vector_column_to_fsl(
-                &RecordBatch::try_new(
-                    Arc::new(ArrowSchema::new(vec![field])),
-                    vec![filtered_vectors],
-                )?,
-                column,
-            )?
-        };
-
-        let matrix = matrix_from_vectors(&filtered_vectors)?;
-        let matrix_view = matrix.view()?;
-        let input_slice = matrix_view
-            .as_slice_memory_order()
-            .ok_or_else(|| Error::io("transform matrix is not contiguous"))?;
-
-        slot.launch(
-            trained,
-            cuda_stream,
-            filtered_row_ids,
-            input_slice,
-            matrix.rows(),
-            matrix_view.ncols(),
-        )?;
+            stats.send += send_start.elapsed();
+        }
         next_slot = (next_slot + 1) % PIPELINE_SLOTS;
     }
+    let prepare_stats = prepare_task
+        .await
+        .map_err(|error| Error::io(format!("prepare transform task failed: {error}")))??;
+    stats.merge_prepare(prepare_stats);
 
     for slot in &mut slots {
+        let drain_start = Instant::now();
         if let Some(transformed) = slot.drain_to_batch(code_width)? {
-            on_batch(transformed).await?;
+            stats.drain += drain_start.elapsed();
+            stats.record_output(&transformed);
+            let send_start = Instant::now();
+            append_tx.send(Ok(transformed)).await.map_err(|error| {
+                Error::io(format!("failed to forward transformed batch: {error}"))
+            })?;
+            stats.send += send_start.elapsed();
+        } else {
+            stats.drain += drain_start.elapsed();
         }
     }
+    stats.log();
     Ok(())
+}
+
+async fn append_artifact_batches(
+    mut artifact: PartitionArtifactBuilder,
+    mut rx: mpsc::Receiver<Result<RecordBatch>>,
+) -> Result<Vec<String>> {
+    let mut batches = 0usize;
+    let mut rows = 0usize;
+    let mut append_time = Duration::default();
+    while let Some(batch) = rx.next().await {
+        let batch = batch?;
+        batches += 1;
+        rows += batch.num_rows();
+        let append_start = Instant::now();
+        artifact.append_batch(&batch).await?;
+        append_time += append_start.elapsed();
+    }
+
+    let finish_start = Instant::now();
+    let files = artifact
+        .finish(PARTITION_ARTIFACT_METADATA_FILE_NAME, None)
+        .await?;
+    let finish_time = finish_start.elapsed();
+    eprintln!(
+        "cuVS artifact append task: batches={} rows={} append_s={:.3} finish_s={:.3} files={}",
+        batches,
+        rows,
+        secs(append_time),
+        secs(finish_time),
+        files.len()
+    );
+    Ok(files)
 }
 
 /// Train an IVF_PQ model with cuVS and return Arrow-native training outputs.
@@ -866,78 +988,39 @@ pub async fn assign_ivf_pq_to_artifact(
     filter_nan: bool,
     storage_options: Option<&HashMap<String, String>>,
 ) -> Result<Vec<String>> {
-    let registry = Arc::new(lance_io::object_store::ObjectStoreRegistry::default());
-    let params = if let Some(storage_options) = storage_options {
-        lance_io::object_store::ObjectStoreParams {
-            storage_options_accessor: Some(Arc::new(
-                lance_io::object_store::StorageOptionsAccessor::with_static_options(
-                    storage_options.clone(),
-                ),
-            )),
-            ..Default::default()
-        }
-    } else {
-        lance_io::object_store::ObjectStoreParams::default()
-    };
-    let (object_store, root_dir) =
-        lance::io::ObjectStore::from_uri_and_params(registry, artifact_uri, &params)
-            .await
-            .map_err(|error| Error::io(error.to_string()))?;
-    if !object_store.is_local() {
-        return Err(Error::not_supported(
-            "partition artifact builds currently require a local filesystem artifact_uri",
-        ));
+    let artifact = PartitionArtifactBuilder::try_new(
+        artifact_uri,
+        trained.num_partitions,
+        trained.pq_code_width(),
+        storage_options,
+    )
+    .await?;
+
+    let (mut append_tx, append_rx) = mpsc::channel::<Result<RecordBatch>>(PIPELINE_SLOTS);
+    let append_task = tokio::spawn(append_artifact_batches(artifact, append_rx));
+
+    let append_start = Instant::now();
+    let append_result = append_transformed_batches_to_artifact(
+        dataset,
+        column,
+        trained,
+        batch_size,
+        filter_nan,
+        &mut append_tx,
+    )
+    .await;
+    drop(append_tx);
+    if let Err(error) = append_result {
+        append_task.abort();
+        return Err(error);
     }
-
-    std::fs::create_dir_all(to_local_path(&root_dir))
-        .map_err(|error| Error::io(format!("failed to create artifact directory: {error}")))?;
-
-    let (tx, rx) = mpsc::channel::<Result<RecordBatch>>(PIPELINE_SLOTS);
-    let mut shuffler = IvfShuffler::try_new(
-        trained.num_partitions as u32,
-        Some(root_dir.clone()),
-        true,
-        None,
-    )?;
-    shuffler = shuffler.with_format_version(LanceFileVersion::V2_0);
-
-    let shuffle_task = tokio::spawn(async move {
-        shuffler.write_unsorted_stream(rx).await?;
-        shuffler
-            .write_partitioned_shuffles(PARTITION_ARTIFACT_SHUFFLE_BATCHES_PER_FILE, PIPELINE_SLOTS)
-            .await
-    });
-
-    let produce_result =
-        for_each_transformed_batch(dataset, column, trained, batch_size, filter_nan, |batch| {
-            let mut tx = tx.clone();
-            async move {
-                tx.send(Ok(batch)).await.map_err(|error| {
-                    Error::io(format!("failed to forward transformed batch: {error}"))
-                })
-            }
-        })
-        .await;
-    drop(tx);
-
-    produce_result?;
-    write_partition_artifact_metadata(artifact_uri, trained, storage_options).await?;
-
-    let mut files = shuffle_task
+    eprintln!(
+        "cuVS artifact append_transformed_batches time: {:.3}s",
+        append_start.elapsed().as_secs_f64()
+    );
+    let files = append_task
         .await
-        .map_err(|error| Error::io(format!("partition artifact shuffle task failed: {error}")))??;
-
-    let unsorted_path = root_dir.child(PARTITION_ARTIFACT_UNSORTED_FILE_NAME);
-    let unsorted_local_path = to_local_path(&unsorted_path);
-    if std::path::Path::new(&unsorted_local_path).exists() {
-        std::fs::remove_file(&unsorted_local_path).map_err(|error| {
-            Error::io(format!(
-                "failed to remove temporary unsorted buffer: {error}"
-            ))
-        })?;
-    }
-
-    files.push(PARTITION_ARTIFACT_METADATA_FILE_NAME.to_string());
+        .map_err(|error| Error::io(format!("partition artifact append task failed: {error}")))??;
     Ok(files)
 }
 

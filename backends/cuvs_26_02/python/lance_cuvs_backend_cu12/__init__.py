@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+from collections.abc import Mapping
 
 from ._native import (
     IvfPqArtifactOutput,
@@ -31,6 +32,7 @@ def train_ivf_pq(
     max_iters: int = 50,
     num_bits: int = 8,
     filter_nan: bool = True,
+    storage_options: Mapping[str, str] | None = None,
 ) -> IvfPqTrainingOutput:
     """Train an IVF_PQ model with cuVS.
 
@@ -55,6 +57,8 @@ def train_ivf_pq(
         Number of bits per PQ code. cuVS currently supports only ``8`` here.
     filter_nan:
         Whether to drop null or non-finite vectors before training.
+    storage_options:
+        Optional Lance storage options used when opening ``dataset_uri``.
 
     Returns
     -------
@@ -72,6 +76,7 @@ def train_ivf_pq(
         max_iters=max_iters,
         num_bits=num_bits,
         filter_nan=filter_nan,
+        storage_options=dict(storage_options) if storage_options is not None else None,
     )
 
 
@@ -83,6 +88,7 @@ def build_ivf_pq_artifact(
     artifact_uri: str | os.PathLike[str] | None = None,
     batch_size: int = 1024 * 128,
     filter_nan: bool = True,
+    storage_options: Mapping[str, str] | None = None,
 ) -> IvfPqArtifactOutput:
     """Encode a dataset into a partition-local IVF_PQ artifact.
 
@@ -102,6 +108,9 @@ def build_ivf_pq_artifact(
         Number of rows per transform batch.
     filter_nan:
         Whether to drop null or non-finite vectors during artifact build.
+    storage_options:
+        Optional Lance storage options used when opening ``dataset_uri`` and
+        writing ``artifact_uri``.
 
     Returns
     -------
@@ -119,6 +128,7 @@ def build_ivf_pq_artifact(
         training=training,
         batch_size=batch_size,
         filter_nan=filter_nan,
+        storage_options=dict(storage_options) if storage_options is not None else None,
     )
 
 

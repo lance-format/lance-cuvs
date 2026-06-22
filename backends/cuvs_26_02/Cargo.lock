@@ -4657,6 +4657,7 @@ dependencies = [
  "lance-index",
  "lance-io",
  "lance-linalg",
+ "libc",
  "log",
  "ndarray 0.16.1",
  "pyo3",

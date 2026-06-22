@@ -20,6 +20,8 @@ pub(crate) type CudaEventHandle = *mut c_void;
 unsafe extern "C" {
     fn cudaMallocHost(ptr: *mut *mut c_void, size: usize) -> cuvs_sys::cudaError_t;
     fn cudaFreeHost(ptr: *mut c_void) -> cuvs_sys::cudaError_t;
+    fn cudaHostRegister(ptr: *mut c_void, size: usize, flags: u32) -> cuvs_sys::cudaError_t;
+    fn cudaHostUnregister(ptr: *mut c_void) -> cuvs_sys::cudaError_t;
     fn cudaEventCreate(event: *mut CudaEventHandle) -> cuvs_sys::cudaError_t;
     fn cudaEventDestroy(event: CudaEventHandle) -> cuvs_sys::cudaError_t;
     fn cudaEventRecord(
@@ -69,13 +71,6 @@ impl MatrixBuffer<'_> {
                     Error::io(format!("failed to create borrowed matrix view: {error}"))
                 }),
             Self::Owned(array) => Ok(array.view()),
-        }
-    }
-
-    pub(crate) fn rows(&self) -> usize {
-        match self {
-            Self::Borrowed { rows, .. } => *rows,
-            Self::Owned(array) => array.nrows(),
         }
     }
 }
@@ -290,6 +285,75 @@ impl<T: DlElement> Drop for DeviceTensor<T> {
     }
 }
 
+pub(crate) struct RegisteredHostBuffer {
+    ptr: *mut c_void,
+    original_bytes: usize,
+}
+
+// CUDA host registration owns a process-local address range; unregistering it
+// from the consumer task is safe because CUDA runtime calls are thread-safe.
+unsafe impl Send for RegisteredHostBuffer {}
+
+impl RegisteredHostBuffer {
+    pub(crate) fn try_new<T>(slice: &[T]) -> Result<Self> {
+        let original_bytes = std::mem::size_of_val(slice);
+        if original_bytes == 0 {
+            return Ok(Self {
+                ptr: ptr::null_mut(),
+                original_bytes: 0,
+            });
+        }
+
+        let page_size = page_size()?;
+        let start = slice.as_ptr() as usize;
+        let end = start
+            .checked_add(original_bytes)
+            .ok_or_else(|| Error::io("registered host buffer size overflow"))?;
+        let aligned_start = start & !(page_size - 1);
+        let aligned_end = end
+            .checked_add(page_size - 1)
+            .ok_or_else(|| Error::io("registered host buffer alignment overflow"))?
+            & !(page_size - 1);
+        let bytes = aligned_end - aligned_start;
+        let ptr = aligned_start as *mut c_void;
+
+        check_cuda(
+            unsafe { cudaHostRegister(ptr, bytes, 0) },
+            "register host buffer",
+        )?;
+        Ok(Self {
+            ptr,
+            original_bytes,
+        })
+    }
+
+    pub(crate) fn original_bytes(&self) -> usize {
+        self.original_bytes
+    }
+}
+
+impl Drop for RegisteredHostBuffer {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() {
+            let _ = unsafe { cudaHostUnregister(self.ptr) };
+        }
+    }
+}
+
+fn page_size() -> Result<usize> {
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if page_size <= 0 {
+        return Err(Error::io("failed to resolve system page size"));
+    }
+    let page_size = page_size as usize;
+    if !page_size.is_power_of_two() {
+        return Err(Error::io(format!(
+            "system page size {page_size} is not a power of two"
+        )));
+    }
+    Ok(page_size)
+}
+
 pub(crate) struct PinnedHostBuffer<T> {
     ptr: *mut T,
     len: usize,
@@ -339,18 +403,6 @@ impl<T: Copy> PinnedHostBuffer<T> {
             )));
         }
         Ok(&mut self.as_mut_slice()[..len])
-    }
-
-    pub(crate) fn copy_from_slice(&mut self, src: &[T]) -> Result<()> {
-        if src.len() > self.len {
-            return Err(Error::io(format!(
-                "pinned host buffer length {} is smaller than source length {}",
-                self.len,
-                src.len()
-            )));
-        }
-        self.prefix_mut(src.len())?.copy_from_slice(src);
-        Ok(())
     }
 }
 
