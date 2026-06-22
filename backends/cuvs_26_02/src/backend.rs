@@ -9,9 +9,11 @@ use crate::cuda::{
 };
 use arrow::compute::{concat_batches, filter};
 use arrow_array::cast::AsArray;
+use arrow_array::types::Float32Type;
 use arrow_array::{Array, ArrayRef, FixedSizeListArray, RecordBatch, UInt8Array, UInt32Array};
 use arrow_schema::{DataType, Field, Schema as ArrowSchema};
 use cuvs::Resources;
+use futures::lock::Mutex;
 use futures::{
     FutureExt, SinkExt, StreamExt, TryStreamExt, channel::mpsc, future::LocalBoxFuture, stream,
 };
@@ -24,6 +26,7 @@ use lance_index::vector::utils::is_finite;
 use lance_index::vector::{PART_ID_COLUMN, PQ_CODE_COLUMN};
 use lance_linalg::distance::DistanceType;
 use log::warn;
+use ndarray::Array2;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
@@ -31,8 +34,9 @@ use std::time::{Duration, Instant};
 
 const PARTITION_ARTIFACT_METADATA_FILE_NAME: &str = "metadata.lance";
 const PIPELINE_SLOTS: usize = 2;
-const DEFAULT_SCAN_FRAGMENT_READAHEAD: usize = 64;
+const DEFAULT_SCAN_FRAGMENT_READAHEAD: usize = 0;
 const DEFAULT_SCAN_IO_BUFFER_SIZE: u64 = 16 * 1024 * 1024 * 1024;
+const DEFAULT_PREPARE_WORKERS: usize = 1;
 const TRAINING_SAMPLE_CHUNK_ROWS: usize = 8 * 1024;
 const TRAINING_SAMPLE_BATCH_READAHEAD: usize = 64;
 
@@ -348,22 +352,69 @@ struct TransformSlot {
     transform_done: CudaEvent,
     output_ready: CudaEvent,
     input_vectors: Option<FixedSizeListArray>,
+    input_matrix: Option<Array2<f32>>,
     input_registration: Option<RegisteredHostBuffer>,
     row_ids: Option<Arc<dyn Array>>,
     rows: usize,
 }
 
+enum PreparedMatrix {
+    F32Arrow {
+        vectors: FixedSizeListArray,
+        rows: usize,
+        dimension: usize,
+    },
+    Owned(Array2<f32>),
+}
+
+impl PreparedMatrix {
+    fn rows(&self) -> usize {
+        match self {
+            Self::F32Arrow { rows, .. } => *rows,
+            Self::Owned(array) => array.nrows(),
+        }
+    }
+
+    fn dimension(&self) -> usize {
+        match self {
+            Self::F32Arrow { dimension, .. } => *dimension,
+            Self::Owned(array) => array.ncols(),
+        }
+    }
+
+    fn input_slice(&self) -> Result<&[f32]> {
+        match self {
+            Self::F32Arrow { vectors, .. } => {
+                let values = vectors.values().as_primitive::<Float32Type>();
+                Ok(values.values().as_ref())
+            }
+            Self::Owned(array) => array
+                .as_slice_memory_order()
+                .ok_or_else(|| Error::io("transform matrix is not contiguous")),
+        }
+    }
+}
+
 struct PreparedTransformBatch {
     row_ids: Arc<dyn Array>,
-    vectors: FixedSizeListArray,
+    matrix: PreparedMatrix,
     input_registration: Option<RegisteredHostBuffer>,
 }
 
 #[derive(Default)]
-struct ArtifactPrepareStats {
+struct ArtifactScannerStats {
     input_batches: usize,
     input_rows: usize,
     scan_wait: Duration,
+    send: Duration,
+}
+
+#[derive(Default)]
+struct ArtifactPrepareStats {
+    workers: usize,
+    input_batches: usize,
+    input_rows: usize,
+    raw_wait: Duration,
     send: Duration,
     vector: Duration,
     filter: Duration,
@@ -390,6 +441,7 @@ impl TransformSlot {
             transform_done: CudaEvent::try_new()?,
             output_ready: CudaEvent::try_new()?,
             input_vectors: None,
+            input_matrix: None,
             input_registration: None,
             row_ids: None,
             rows: 0,
@@ -408,19 +460,10 @@ impl TransformSlot {
     ) -> Result<()> {
         let code_width = trained.pq_code_width();
         let row_ids = prepared.row_ids;
-        let vectors = prepared.vectors;
-        let matrix = matrix_from_vectors(&vectors)?;
-        let (input_slice, rows, dimension, keep_input_vectors) = match &matrix {
-            MatrixBuffer::Borrowed { values, rows, cols } => (*values, *rows, *cols, true),
-            MatrixBuffer::Owned(array) => (
-                array
-                    .as_slice_memory_order()
-                    .ok_or_else(|| Error::io("transform matrix is not contiguous"))?,
-                array.nrows(),
-                array.ncols(),
-                false,
-            ),
-        };
+        let matrix = prepared.matrix;
+        let rows = matrix.rows();
+        let dimension = matrix.dimension();
+        let input_slice = matrix.input_slice()?;
 
         self.input_device.set_shape(&[rows, dimension])?;
         self.labels_device.set_shape(&[rows])?;
@@ -433,11 +476,15 @@ impl TransformSlot {
         self.input_device
             .copy_from_host_async(&trained.resources, input_slice)?;
         self.h2d_done.record(stream)?;
-        if keep_input_vectors {
-            self.input_vectors = Some(vectors);
-        } else {
-            self.h2d_done.synchronize()?;
-            self.input_vectors = None;
+        match matrix {
+            PreparedMatrix::F32Arrow { vectors, .. } => {
+                self.input_vectors = Some(vectors);
+                self.input_matrix = None;
+            }
+            PreparedMatrix::Owned(array) => {
+                self.input_vectors = None;
+                self.input_matrix = Some(array);
+            }
         }
         check_cuvs(
             unsafe {
@@ -470,6 +517,7 @@ impl TransformSlot {
         self.output_ready.synchronize()?;
         self.input_registration = None;
         self.input_vectors = None;
+        self.input_matrix = None;
         let row_ids = self
             .row_ids
             .take()
@@ -487,11 +535,17 @@ impl TransformSlot {
 
 #[derive(Default)]
 struct ArtifactBuildStats {
+    scanner_tasks: usize,
+    prepare_workers: usize,
     input_batches: usize,
     input_rows: usize,
+    prepared_batches: usize,
+    prepared_rows: usize,
     output_batches: usize,
     output_rows: usize,
     scan_wait: Duration,
+    raw_send: Duration,
+    raw_wait: Duration,
     drain: Duration,
     send: Duration,
     prepare_send: Duration,
@@ -504,10 +558,19 @@ struct ArtifactBuildStats {
 }
 
 impl ArtifactBuildStats {
+    fn merge_scanner(&mut self, scanner: ArtifactScannerStats) {
+        self.scanner_tasks += 1;
+        self.input_batches += scanner.input_batches;
+        self.input_rows += scanner.input_rows;
+        self.scan_wait += scanner.scan_wait;
+        self.raw_send += scanner.send;
+    }
+
     fn merge_prepare(&mut self, prepare: ArtifactPrepareStats) {
-        self.input_batches += prepare.input_batches;
-        self.input_rows += prepare.input_rows;
-        self.scan_wait += prepare.scan_wait;
+        self.prepare_workers += prepare.workers;
+        self.prepared_batches += prepare.input_batches;
+        self.prepared_rows += prepare.input_rows;
+        self.raw_wait += prepare.raw_wait;
         self.prepare_send += prepare.send;
         self.vector += prepare.vector;
         self.filter += prepare.filter;
@@ -523,12 +586,18 @@ impl ArtifactBuildStats {
 
     fn log(&self) {
         eprintln!(
-            "cuVS artifact stages: input_batches={} input_rows={} output_batches={} output_rows={} scan_wait_s={:.3} drain_s={:.3} send_s={:.3} prepare_send_s={:.3} vector_s={:.3} filter_s={:.3} matrix_s={:.3} launch_s={:.3}",
+            "cuVS artifact stages: scanner_tasks={} prepare_workers={} input_batches={} input_rows={} prepared_batches={} prepared_rows={} output_batches={} output_rows={} scan_wait_s={:.3} raw_send_s={:.3} raw_wait_s={:.3} drain_s={:.3} send_s={:.3} prepare_send_s={:.3} vector_s={:.3} filter_s={:.3} matrix_s={:.3} launch_s={:.3}",
+            self.scanner_tasks,
+            self.prepare_workers,
             self.input_batches,
             self.input_rows,
+            self.prepared_batches,
+            self.prepared_rows,
             self.output_batches,
             self.output_rows,
             secs(self.scan_wait),
+            secs(self.raw_send),
+            secs(self.raw_wait),
             secs(self.drain),
             secs(self.send),
             secs(self.prepare_send),
@@ -547,6 +616,21 @@ impl ArtifactBuildStats {
 
 fn secs(duration: Duration) -> f64 {
     duration.as_secs_f64()
+}
+
+fn prepare_workers_from_env() -> usize {
+    std::env::var("LANCE_CUVS_PREPARE_WORKERS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|workers| *workers > 0)
+        .unwrap_or(DEFAULT_PREPARE_WORKERS)
+}
+
+fn scan_fragment_readahead_from_env() -> usize {
+    std::env::var("LANCE_CUVS_SCAN_FRAGMENT_READAHEAD")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_SCAN_FRAGMENT_READAHEAD)
 }
 
 fn training_sample_ranges(num_rows: usize, sample_rows: usize) -> Vec<Range<u64>> {
@@ -605,13 +689,13 @@ async fn sample_training_vectors(
     Ok(vector_column_to_fsl(&batch, column)?)
 }
 
-async fn prepare_transform_batches(
+async fn scan_transform_batches(
     dataset: Dataset,
     column: String,
     batch_size: usize,
     filter_nan: bool,
-    mut prepared_tx: mpsc::Sender<PreparedTransformBatch>,
-) -> Result<ArtifactPrepareStats> {
+    mut raw_tx: mpsc::Sender<RecordBatch>,
+) -> Result<ArtifactScannerStats> {
     let mut scanner = dataset.scan();
     scanner.project(&[&column])?;
     if dataset
@@ -624,10 +708,10 @@ async fn prepare_transform_batches(
     scanner.with_row_id();
     scanner.batch_size(batch_size);
     scanner.scan_in_order(false);
-    scanner.fragment_readahead(DEFAULT_SCAN_FRAGMENT_READAHEAD);
+    scanner.fragment_readahead(scan_fragment_readahead_from_env());
     scanner.io_buffer_size(DEFAULT_SCAN_IO_BUFFER_SIZE);
     let mut stream = scanner.try_into_stream().await?;
-    let mut stats = ArtifactPrepareStats::default();
+    let mut stats = ArtifactScannerStats::default();
 
     loop {
         let scan_start = Instant::now();
@@ -639,93 +723,165 @@ async fn prepare_transform_batches(
         stats.input_batches += 1;
         stats.input_rows += batch.num_rows();
 
-        let vector_start = Instant::now();
-        let vectors = vector_column_to_fsl(&batch, &column)?;
-        let row_ids = batch
-            .column_by_name(ROW_ID)
-            .ok_or_else(|| Error::invalid_input(format!("transform batch is missing {ROW_ID}")))?;
-        stats.vector += vector_start.elapsed();
+        let send_start = Instant::now();
+        raw_tx
+            .send(batch)
+            .await
+            .map_err(|error| Error::io(format!("failed to forward raw batch: {error}")))?;
+        stats.send += send_start.elapsed();
+    }
 
-        let filter_start = Instant::now();
-        let (filtered_row_ids, filtered_vectors) = if filter_nan {
-            let finite_mask = is_finite(&vectors);
-            let valid_rows = finite_mask.true_count();
-            if valid_rows == 0 {
-                continue;
-            }
-            if valid_rows != vectors.len() {
-                warn!(
-                    "{} vectors are ignored during partition assignment because they are null or non-finite",
-                    vectors.len() - valid_rows
-                );
-            }
+    Ok(stats)
+}
 
-            let filtered_row_ids = if valid_rows == row_ids.len() {
-                row_ids.clone()
-            } else {
-                filter(row_ids.as_ref(), &finite_mask)?
-            };
-            let filtered_vectors = if valid_rows == vectors.len() {
-                vectors
-            } else {
-                let vector_column = batch.column_by_name(&column).ok_or_else(|| {
-                    Error::invalid_input(format!(
-                        "transform batch is missing vector column '{column}'"
-                    ))
-                })?;
-                let field = batch
-                    .schema()
-                    .field_with_name(&column)
-                    .map_err(|_| {
-                        Error::invalid_input(format!(
-                            "transform batch schema is missing field '{column}'"
-                        ))
-                    })?
-                    .clone();
-                let filtered_vectors = filter(vector_column.as_ref(), &finite_mask)?;
-                vector_column_to_fsl(
-                    &RecordBatch::try_new(
-                        Arc::new(ArrowSchema::new(vec![field])),
-                        vec![filtered_vectors],
-                    )?,
-                    &column,
-                )?
-            };
-            (filtered_row_ids, filtered_vectors)
+fn prepare_transform_batch(
+    batch: RecordBatch,
+    column: &str,
+    filter_nan: bool,
+    stats: &mut ArtifactPrepareStats,
+) -> Result<Option<PreparedTransformBatch>> {
+    stats.input_batches += 1;
+    stats.input_rows += batch.num_rows();
+
+    let vector_start = Instant::now();
+    let vectors = vector_column_to_fsl(&batch, column)?;
+    let row_ids = batch
+        .column_by_name(ROW_ID)
+        .ok_or_else(|| Error::invalid_input(format!("transform batch is missing {ROW_ID}")))?;
+    stats.vector += vector_start.elapsed();
+
+    let filter_start = Instant::now();
+    let (filtered_row_ids, filtered_vectors) = if filter_nan {
+        let finite_mask = is_finite(&vectors);
+        let valid_rows = finite_mask.true_count();
+        if valid_rows == 0 {
+            stats.filter += filter_start.elapsed();
+            return Ok(None);
+        }
+        if valid_rows != vectors.len() {
+            warn!(
+                "{} vectors are ignored during partition assignment because they are null or non-finite",
+                vectors.len() - valid_rows
+            );
+        }
+
+        let filtered_row_ids = if valid_rows == row_ids.len() {
+            row_ids.clone()
         } else {
-            (row_ids.clone(), vectors)
+            filter(row_ids.as_ref(), &finite_mask)?
         };
-        stats.filter += filter_start.elapsed();
-
-        let matrix_start = Instant::now();
-        let matrix = matrix_from_vectors(&filtered_vectors)?;
-        let input_registration = match &matrix {
-            MatrixBuffer::Borrowed { values, .. } => {
-                let register_start = Instant::now();
-                let registration = match RegisteredHostBuffer::try_new(values) {
-                    Ok(registration) => Some(registration),
-                    Err(error) => {
-                        warn!(
-                            "failed to register host vector buffer for CUDA H2D; falling back to pageable memory: {error}"
-                        );
-                        None
-                    }
-                };
-                stats.register += register_start.elapsed();
-                stats.registered_bytes += registration
-                    .as_ref()
-                    .map(RegisteredHostBuffer::original_bytes)
-                    .unwrap_or_default();
-                registration
-            }
-            MatrixBuffer::Owned(_) => None,
+        let filtered_vectors = if valid_rows == vectors.len() {
+            vectors
+        } else {
+            let vector_column = batch.column_by_name(column).ok_or_else(|| {
+                Error::invalid_input(format!(
+                    "transform batch is missing vector column '{column}'"
+                ))
+            })?;
+            let field = batch
+                .schema()
+                .field_with_name(column)
+                .map_err(|_| {
+                    Error::invalid_input(format!(
+                        "transform batch schema is missing field '{column}'"
+                    ))
+                })?
+                .clone();
+            let filtered_vectors = filter(vector_column.as_ref(), &finite_mask)?;
+            vector_column_to_fsl(
+                &RecordBatch::try_new(
+                    Arc::new(ArrowSchema::new(vec![field])),
+                    vec![filtered_vectors],
+                )?,
+                column,
+            )?
         };
-        stats.matrix += matrix_start.elapsed();
+        (filtered_row_ids, filtered_vectors)
+    } else {
+        (row_ids.clone(), vectors)
+    };
+    stats.filter += filter_start.elapsed();
 
-        let prepared = PreparedTransformBatch {
-            row_ids: filtered_row_ids,
-            vectors: filtered_vectors,
-            input_registration,
+    let matrix_start = Instant::now();
+    let matrix = matrix_from_vectors(&filtered_vectors)?;
+    stats.matrix += matrix_start.elapsed();
+
+    let (prepared_matrix, input_registration) = match matrix {
+        MatrixBuffer::Borrowed { values, rows, cols } => {
+            let register_start = Instant::now();
+            let registration = match RegisteredHostBuffer::try_new(values) {
+                Ok(registration) => Some(registration),
+                Err(error) => {
+                    warn!(
+                        "failed to register host vector buffer for CUDA H2D; falling back to pageable memory: {error}"
+                    );
+                    None
+                }
+            };
+            stats.register += register_start.elapsed();
+            stats.registered_bytes += registration
+                .as_ref()
+                .map(RegisteredHostBuffer::original_bytes)
+                .unwrap_or_default();
+            (
+                PreparedMatrix::F32Arrow {
+                    vectors: filtered_vectors,
+                    rows,
+                    dimension: cols,
+                },
+                registration,
+            )
+        }
+        MatrixBuffer::Owned(array) => (PreparedMatrix::Owned(array), None),
+    };
+
+    Ok(Some(PreparedTransformBatch {
+        row_ids: filtered_row_ids,
+        matrix: prepared_matrix,
+        input_registration,
+    }))
+}
+
+async fn prepare_transform_batches(
+    column: String,
+    filter_nan: bool,
+    raw_rx: Arc<Mutex<mpsc::Receiver<RecordBatch>>>,
+    mut prepared_tx: mpsc::Sender<PreparedTransformBatch>,
+) -> Result<ArtifactPrepareStats> {
+    let mut stats = ArtifactPrepareStats {
+        workers: 1,
+        ..Default::default()
+    };
+
+    loop {
+        let raw_wait_start = Instant::now();
+        let batch = {
+            let mut raw_rx = raw_rx.lock().await;
+            raw_rx.next().await
+        };
+        stats.raw_wait += raw_wait_start.elapsed();
+
+        let Some(batch) = batch else {
+            break;
+        };
+        let column = column.clone();
+        let (prepared, batch_stats) = tokio::task::spawn_blocking(move || {
+            let mut batch_stats = ArtifactPrepareStats::default();
+            let prepared = prepare_transform_batch(batch, &column, filter_nan, &mut batch_stats)?;
+            Ok::<_, Error>((prepared, batch_stats))
+        })
+        .await
+        .map_err(|error| Error::io(format!("prepare transform blocking task failed: {error}")))??;
+        stats.input_batches += batch_stats.input_batches;
+        stats.input_rows += batch_stats.input_rows;
+        stats.vector += batch_stats.vector;
+        stats.filter += batch_stats.filter;
+        stats.matrix += batch_stats.matrix;
+        stats.register += batch_stats.register;
+        stats.registered_bytes += batch_stats.registered_bytes;
+
+        let Some(prepared) = prepared else {
+            continue;
         };
         let send_start = Instant::now();
         prepared_tx
@@ -763,14 +919,34 @@ async fn append_transformed_batches_to_artifact(
         .collect::<Result<Vec<_>>>()?;
     let mut next_slot = 0usize;
     let mut stats = ArtifactBuildStats::default();
-    let (prepared_tx, mut prepared_rx) = mpsc::channel::<PreparedTransformBatch>(PIPELINE_SLOTS);
-    let prepare_task = tokio::spawn(prepare_transform_batches(
+    let prepare_workers = prepare_workers_from_env();
+    if prepare_workers > 1 {
+        eprintln!(
+            "cuVS artifact prepare: using {} workers behind a single scanner",
+            prepare_workers
+        );
+    }
+    let (raw_tx, raw_rx) = mpsc::channel::<RecordBatch>(prepare_workers);
+    let raw_rx = Arc::new(Mutex::new(raw_rx));
+    let scanner_task = tokio::spawn(scan_transform_batches(
         dataset.clone(),
         column.to_string(),
         batch_size,
         filter_nan,
-        prepared_tx,
+        raw_tx,
     ));
+    let (prepared_tx, mut prepared_rx) = mpsc::channel::<PreparedTransformBatch>(PIPELINE_SLOTS);
+    let prepare_tasks = (0..prepare_workers)
+        .map(|_| {
+            tokio::spawn(prepare_transform_batches(
+                column.to_string(),
+                filter_nan,
+                raw_rx.clone(),
+                prepared_tx.clone(),
+            ))
+        })
+        .collect::<Vec<_>>();
+    drop(prepared_tx);
 
     while let Some(prepared) = prepared_rx.next().await {
         let slot = &mut slots[next_slot];
@@ -797,10 +973,16 @@ async fn append_transformed_batches_to_artifact(
         }
         next_slot = (next_slot + 1) % PIPELINE_SLOTS;
     }
-    let prepare_stats = prepare_task
+    for prepare_task in prepare_tasks {
+        let prepare_stats = prepare_task
+            .await
+            .map_err(|error| Error::io(format!("prepare transform task failed: {error}")))??;
+        stats.merge_prepare(prepare_stats);
+    }
+    let scanner_stats = scanner_task
         .await
-        .map_err(|error| Error::io(format!("prepare transform task failed: {error}")))??;
-    stats.merge_prepare(prepare_stats);
+        .map_err(|error| Error::io(format!("scanner transform task failed: {error}")))??;
+    stats.merge_scanner(scanner_stats);
 
     for slot in &mut slots {
         let drain_start = Instant::now();
