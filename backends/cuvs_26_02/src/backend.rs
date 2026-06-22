@@ -7,12 +7,14 @@ use crate::cuda::{
     create_index_params, destroy_index_params, ivf_centroids_from_host, make_tensor_view,
     matrix_from_vectors, pq_codebook_from_host,
 };
-use arrow::compute::filter;
+use arrow::compute::{concat_batches, filter};
 use arrow_array::cast::AsArray;
 use arrow_array::{Array, ArrayRef, FixedSizeListArray, RecordBatch, UInt8Array, UInt32Array};
 use arrow_schema::{DataType, Field, Schema as ArrowSchema};
 use cuvs::Resources;
-use futures::{FutureExt, SinkExt, StreamExt, TryStreamExt, channel::mpsc, future::LocalBoxFuture};
+use futures::{
+    FutureExt, SinkExt, StreamExt, TryStreamExt, channel::mpsc, future::LocalBoxFuture, stream,
+};
 use lance::dataset::Dataset;
 use lance::index::vector::PartitionArtifactBuilder;
 use lance::index::vector::utils::infer_vector_dim;
@@ -23,6 +25,7 @@ use lance_index::vector::{PART_ID_COLUMN, PQ_CODE_COLUMN};
 use lance_linalg::distance::DistanceType;
 use log::warn;
 use std::collections::HashMap;
+use std::ops::Range;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -30,6 +33,8 @@ const PARTITION_ARTIFACT_METADATA_FILE_NAME: &str = "metadata.lance";
 const PIPELINE_SLOTS: usize = 2;
 const DEFAULT_SCAN_FRAGMENT_READAHEAD: usize = 64;
 const DEFAULT_SCAN_IO_BUFFER_SIZE: u64 = 16 * 1024 * 1024 * 1024;
+const TRAINING_SAMPLE_CHUNK_ROWS: usize = 8 * 1024;
+const TRAINING_SAMPLE_BATCH_READAHEAD: usize = 64;
 
 /// A trained cuVS IVF_PQ model that can be reused for artifact builds.
 ///
@@ -544,6 +549,62 @@ fn secs(duration: Duration) -> f64 {
     duration.as_secs_f64()
 }
 
+fn training_sample_ranges(num_rows: usize, sample_rows: usize) -> Vec<Range<u64>> {
+    let sample_rows = sample_rows.min(num_rows);
+    if sample_rows == 0 {
+        return Vec::new();
+    }
+    if sample_rows == num_rows {
+        return vec![0..num_rows as u64];
+    }
+
+    let chunk_rows = TRAINING_SAMPLE_CHUNK_ROWS.min(sample_rows);
+    let num_chunks = sample_rows.div_ceil(chunk_rows);
+    let mut remaining = sample_rows;
+    let mut ranges = Vec::with_capacity(num_chunks);
+    for chunk_idx in 0..num_chunks {
+        let rows = chunk_rows.min(remaining);
+        remaining -= rows;
+        let max_start = num_rows - rows;
+        let start = if num_chunks == 1 {
+            max_start / 2
+        } else {
+            ((chunk_idx as u128 * max_start as u128) / (num_chunks - 1) as u128) as usize
+        };
+        ranges.push(start as u64..(start + rows) as u64);
+    }
+    ranges
+}
+
+async fn sample_training_vectors(
+    dataset: &Dataset,
+    column: &str,
+    sample_rows: usize,
+) -> Result<FixedSizeListArray> {
+    let num_rows = dataset.count_rows(None).await?;
+    if num_rows == 0 {
+        return Err(Error::invalid_input(
+            "cuVS training requires at least one training vector",
+        ));
+    }
+
+    let ranges = training_sample_ranges(num_rows, sample_rows);
+    let projection = Arc::new(dataset.schema().project(&[column])?);
+    let stream = dataset.take_scan(
+        Box::pin(stream::iter(ranges.into_iter().map(Ok))),
+        projection,
+        TRAINING_SAMPLE_BATCH_READAHEAD,
+    );
+    let batches = stream.try_collect::<Vec<_>>().await?;
+    let Some(schema) = batches.first().map(RecordBatch::schema) else {
+        return Err(Error::invalid_input(
+            "cuVS training sample did not return any vectors",
+        ));
+    };
+    let batch = concat_batches(&schema, &batches)?;
+    Ok(vector_column_to_fsl(&batch, column)?)
+}
+
 async fn prepare_transform_batches(
     dataset: Dataset,
     column: String,
@@ -850,25 +911,20 @@ pub async fn train_ivf_pq(
         )));
     }
 
-    let num_rows = dataset.count_rows(None).await?;
-    if num_rows == 0 {
-        return Err(Error::invalid_input(
-            "cuVS training requires at least one training vector",
-        ));
-    }
-    let train_rows = num_rows
-        .min((num_partitions * sample_rate).max(256 * 256))
-        .max(1);
+    let train_rows = (num_partitions * sample_rate).max(256 * 256).max(1);
+    let sample_start = Instant::now();
+    let train_vectors = sample_training_vectors(dataset, column, train_rows).await?;
+    eprintln!(
+        "cuVS train sample time: {:.3}s rows={}",
+        sample_start.elapsed().as_secs_f64(),
+        train_vectors.len()
+    );
     let train_vectors = if filter_nan {
-        let batch = dataset.scan().project(&[column])?.try_into_batch().await?;
-        let vectors = vector_column_to_fsl(&batch, column)?;
-        let mask = is_finite(&vectors);
-        let filtered = filter(&vectors, &mask)?.as_fixed_size_list().clone();
+        let mask = is_finite(&train_vectors);
+        let filtered = filter(&train_vectors, &mask)?.as_fixed_size_list().clone();
         filtered.slice(0, train_rows.min(filtered.len()))
     } else {
-        let projection = dataset.schema().project(&[column])?;
-        let batch = dataset.sample(train_rows, &projection, None).await?;
-        vector_column_to_fsl(&batch, column)?
+        train_vectors
     };
     if train_vectors.is_empty() {
         return Err(Error::invalid_input(
