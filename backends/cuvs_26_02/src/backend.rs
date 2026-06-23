@@ -407,6 +407,8 @@ struct DrainedTransformBatch {
     h2d: Duration,
     transform: Duration,
     d2h: Duration,
+    sync: Duration,
+    build_batch: Duration,
 }
 
 #[derive(Default)]
@@ -536,7 +538,9 @@ impl TransformSlot {
             return Ok(None);
         }
 
+        let sync_start = Instant::now();
         self.output_ready.synchronize()?;
+        let sync = sync_start.elapsed();
         let h2d = self.h2d_done.elapsed_since(&self.h2d_start)?;
         let transform = self.transform_done.elapsed_since(&self.h2d_done)?;
         let d2h = self.output_ready.elapsed_since(&self.transform_done)?;
@@ -547,18 +551,22 @@ impl TransformSlot {
             .row_ids
             .take()
             .ok_or_else(|| Error::io("transform slot is missing row ids"))?;
+        let build_batch_start = Instant::now();
         let batch = build_partition_batch(
             row_ids,
             self.labels_host.prefix(self.rows)?,
             self.codes_host.prefix(self.rows * code_width)?,
             code_width,
         )?;
+        let build_batch = build_batch_start.elapsed();
         self.rows = 0;
         Ok(Some(DrainedTransformBatch {
             batch,
             h2d,
             transform,
             d2h,
+            sync,
+            build_batch,
         }))
     }
 }
@@ -589,6 +597,8 @@ struct ArtifactBuildStats {
     launch_h2d_enqueue: Duration,
     launch_transform_call: Duration,
     launch_d2h_enqueue: Duration,
+    drain_sync: Duration,
+    drain_build_batch: Duration,
     register: Duration,
     registered_bytes: usize,
 }
@@ -625,6 +635,8 @@ impl ArtifactBuildStats {
         self.gpu_h2d += drained.h2d;
         self.gpu_transform += drained.transform;
         self.gpu_d2h += drained.d2h;
+        self.drain_sync += drained.sync;
+        self.drain_build_batch += drained.build_batch;
     }
 
     fn record_launch_timings(&mut self, timings: LaunchTimings) {
@@ -671,6 +683,11 @@ impl ArtifactBuildStats {
             secs(self.launch_h2d_enqueue),
             secs(self.launch_transform_call),
             secs(self.launch_d2h_enqueue),
+        );
+        eprintln!(
+            "cuVS artifact drain cpu: sync_s={:.3} build_batch_s={:.3}",
+            secs(self.drain_sync),
+            secs(self.drain_build_batch),
         );
         eprintln!("cuVS artifact max rss: {} KiB", max_rss_kib());
     }
