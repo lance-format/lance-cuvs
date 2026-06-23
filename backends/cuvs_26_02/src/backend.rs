@@ -36,6 +36,7 @@ const PARTITION_ARTIFACT_METADATA_FILE_NAME: &str = "metadata.lance";
 const PIPELINE_SLOTS: usize = 2;
 const DEFAULT_SCAN_FRAGMENT_READAHEAD: usize = 0;
 const DEFAULT_SCAN_IO_BUFFER_SIZE: u64 = 16 * 1024 * 1024 * 1024;
+const DEFAULT_SCAN_BATCH_READAHEAD: usize = 32;
 const DEFAULT_PREPARE_WORKERS: usize = 1;
 const TRAINING_SAMPLE_CHUNK_ROWS: usize = 8 * 1024;
 const TRAINING_SAMPLE_BATCH_READAHEAD: usize = 64;
@@ -409,6 +410,13 @@ struct DrainedTransformBatch {
 }
 
 #[derive(Default)]
+struct LaunchTimings {
+    h2d_enqueue: Duration,
+    transform_call: Duration,
+    d2h_enqueue: Duration,
+}
+
+#[derive(Default)]
 struct ArtifactScannerStats {
     input_batches: usize,
     input_rows: usize,
@@ -464,7 +472,8 @@ impl TransformSlot {
         trained: &TrainedIvfPqIndex,
         stream: cuvs_sys::cudaStream_t,
         prepared: PreparedTransformBatch,
-    ) -> Result<()> {
+    ) -> Result<LaunchTimings> {
+        let mut timings = LaunchTimings::default();
         let code_width = trained.pq_code_width();
         let row_ids = prepared.row_ids;
         let matrix = prepared.matrix;
@@ -480,8 +489,10 @@ impl TransformSlot {
         self.input_registration = prepared.input_registration;
 
         self.h2d_start.record(stream)?;
+        let h2d_enqueue_start = Instant::now();
         self.input_device
             .copy_from_host_async(&trained.resources, input_slice)?;
+        timings.h2d_enqueue += h2d_enqueue_start.elapsed();
         self.h2d_done.record(stream)?;
         match matrix {
             PreparedMatrix::F32Arrow { vectors, .. } => {
@@ -493,6 +504,7 @@ impl TransformSlot {
                 self.input_matrix = Some(array);
             }
         }
+        let transform_call_start = Instant::now();
         check_cuvs(
             unsafe {
                 cuvs_sys::cuvsIvfPqTransform(
@@ -505,15 +517,18 @@ impl TransformSlot {
             },
             "transform vectors with IVF_PQ",
         )?;
+        timings.transform_call += transform_call_start.elapsed();
         self.transform_done.record(stream)?;
+        let d2h_enqueue_start = Instant::now();
         self.labels_device
             .copy_to_host_async(&trained.resources, self.labels_host.prefix_mut(rows)?)?;
         self.codes_device.copy_to_host_async(
             &trained.resources,
             self.codes_host.prefix_mut(rows * code_width)?,
         )?;
+        timings.d2h_enqueue += d2h_enqueue_start.elapsed();
         self.output_ready.record(stream)?;
-        Ok(())
+        Ok(timings)
     }
 
     fn drain_to_batch(&mut self, code_width: usize) -> Result<Option<DrainedTransformBatch>> {
@@ -571,6 +586,9 @@ struct ArtifactBuildStats {
     gpu_h2d: Duration,
     gpu_transform: Duration,
     gpu_d2h: Duration,
+    launch_h2d_enqueue: Duration,
+    launch_transform_call: Duration,
+    launch_d2h_enqueue: Duration,
     register: Duration,
     registered_bytes: usize,
 }
@@ -609,6 +627,12 @@ impl ArtifactBuildStats {
         self.gpu_d2h += drained.d2h;
     }
 
+    fn record_launch_timings(&mut self, timings: LaunchTimings) {
+        self.launch_h2d_enqueue += timings.h2d_enqueue;
+        self.launch_transform_call += timings.transform_call;
+        self.launch_d2h_enqueue += timings.d2h_enqueue;
+    }
+
     fn log(&self) {
         eprintln!(
             "cuVS artifact stages: scanner_tasks={} prepare_workers={} input_batches={} input_rows={} prepared_batches={} prepared_rows={} output_batches={} output_rows={} scan_wait_s={:.3} raw_send_s={:.3} raw_wait_s={:.3} drain_s={:.3} send_s={:.3} prepare_send_s={:.3} vector_s={:.3} filter_s={:.3} matrix_s={:.3} launch_s={:.3}",
@@ -642,11 +666,28 @@ impl ArtifactBuildStats {
             secs(self.gpu_transform),
             secs(self.gpu_d2h),
         );
+        eprintln!(
+            "cuVS artifact launch cpu: h2d_enqueue_s={:.3} transform_call_s={:.3} d2h_enqueue_s={:.3}",
+            secs(self.launch_h2d_enqueue),
+            secs(self.launch_transform_call),
+            secs(self.launch_d2h_enqueue),
+        );
+        eprintln!("cuVS artifact max rss: {} KiB", max_rss_kib());
     }
 }
 
 fn secs(duration: Duration) -> f64 {
     duration.as_secs_f64()
+}
+
+fn max_rss_kib() -> i64 {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+    let status = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+    if status == 0 {
+        unsafe { usage.assume_init().ru_maxrss }
+    } else {
+        -1
+    }
 }
 
 fn prepare_workers_from_env() -> usize {
@@ -662,6 +703,14 @@ fn scan_fragment_readahead_from_env() -> usize {
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(DEFAULT_SCAN_FRAGMENT_READAHEAD)
+}
+
+fn scan_batch_readahead_from_env() -> usize {
+    std::env::var("LANCE_CUVS_SCAN_BATCH_READAHEAD")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_SCAN_BATCH_READAHEAD)
 }
 
 fn training_sample_ranges(num_rows: usize, sample_rows: usize) -> Vec<Range<u64>> {
@@ -740,6 +789,7 @@ async fn scan_transform_batches(
     scanner.batch_size(batch_size);
     scanner.scan_in_order(false);
     scanner.fragment_readahead(scan_fragment_readahead_from_env());
+    scanner.batch_readahead(scan_batch_readahead_from_env());
     scanner.io_buffer_size(DEFAULT_SCAN_IO_BUFFER_SIZE);
     let mut stream = scanner.try_into_stream().await?;
     let mut stats = ArtifactScannerStats::default();
@@ -992,8 +1042,9 @@ async fn append_transformed_batches_to_artifact(
         };
 
         let launch_start = Instant::now();
-        slot.launch(trained, cuda_stream, prepared)?;
+        let launch_timings = slot.launch(trained, cuda_stream, prepared)?;
         stats.launch += launch_start.elapsed();
+        stats.record_launch_timings(launch_timings);
 
         if let Some(transformed) = transformed {
             let send_start = Instant::now();
