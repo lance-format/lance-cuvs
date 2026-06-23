@@ -22,6 +22,16 @@ unsafe extern "C" {
     fn cudaFreeHost(ptr: *mut c_void) -> cuvs_sys::cudaError_t;
     fn cudaHostRegister(ptr: *mut c_void, size: usize, flags: u32) -> cuvs_sys::cudaError_t;
     fn cudaHostUnregister(ptr: *mut c_void) -> cuvs_sys::cudaError_t;
+    fn cudaMemcpy2DAsync(
+        dst: *mut c_void,
+        dpitch: usize,
+        src: *const c_void,
+        spitch: usize,
+        width: usize,
+        height: usize,
+        kind: cuvs_sys::cudaMemcpyKind,
+        stream: cuvs_sys::cudaStream_t,
+    ) -> cuvs_sys::cudaError_t;
     fn cudaEventCreate(event: *mut CudaEventHandle) -> cuvs_sys::cudaError_t;
     fn cudaEventDestroy(event: CudaEventHandle) -> cuvs_sys::cudaError_t;
     fn cudaEventRecord(
@@ -584,20 +594,48 @@ pub(crate) fn copy_tensor_to_host_f32_2d(
         )));
     }
     let mut array = Array2::<f32>::zeros((shape[0], shape[1]));
-    check_cuda(
-        unsafe {
-            cuvs_sys::cudaMemcpyAsync(
-                array.as_mut_ptr() as *mut _,
-                tensor.dl_tensor.data,
-                tensor_num_bytes(tensor),
-                cuvs_sys::cudaMemcpyKind_cudaMemcpyDefault,
-                resources
-                    .get_cuda_stream()
-                    .map_err(|e| Error::io(e.to_string()))?,
-            )
-        },
-        "copy tensor to host",
-    )?;
+    let stream = resources
+        .get_cuda_stream()
+        .map_err(|e| Error::io(e.to_string()))?;
+    if tensor.dl_tensor.strides.is_null() {
+        check_cuda(
+            unsafe {
+                cuvs_sys::cudaMemcpyAsync(
+                    array.as_mut_ptr() as *mut _,
+                    tensor.dl_tensor.data,
+                    tensor_num_bytes(tensor),
+                    cuvs_sys::cudaMemcpyKind_cudaMemcpyDefault,
+                    stream,
+                )
+            },
+            "copy tensor to host",
+        )?;
+    } else {
+        let row_stride = unsafe { *tensor.dl_tensor.strides } as usize;
+        let col_stride = unsafe { *tensor.dl_tensor.strides.add(1) } as usize;
+        if col_stride != 1 {
+            return Err(Error::not_supported(format!(
+                "copying 2D tensors with non-unit column stride is not supported: strides=({}, {})",
+                row_stride, col_stride
+            )));
+        }
+        let row_bytes = shape[1] * std::mem::size_of::<f32>();
+        check_cuda(
+            unsafe {
+                cudaMemcpy2DAsync(
+                    array.as_mut_ptr().cast::<c_void>(),
+                    row_bytes,
+                    tensor.dl_tensor.data,
+                    row_stride * std::mem::size_of::<f32>(),
+                    row_bytes,
+                    shape[0],
+                    cuvs_sys::cudaMemcpyKind_cudaMemcpyDefault,
+                    stream,
+                )
+            },
+            "copy strided tensor to host",
+        )?;
+    }
     resources
         .sync_stream()
         .map_err(|e| Error::io(e.to_string()))?;
