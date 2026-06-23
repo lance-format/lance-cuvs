@@ -20,6 +20,18 @@ pub(crate) type CudaEventHandle = *mut c_void;
 unsafe extern "C" {
     fn cudaMallocHost(ptr: *mut *mut c_void, size: usize) -> cuvs_sys::cudaError_t;
     fn cudaFreeHost(ptr: *mut c_void) -> cuvs_sys::cudaError_t;
+    fn cudaHostRegister(ptr: *mut c_void, size: usize, flags: u32) -> cuvs_sys::cudaError_t;
+    fn cudaHostUnregister(ptr: *mut c_void) -> cuvs_sys::cudaError_t;
+    fn cudaMemcpy2DAsync(
+        dst: *mut c_void,
+        dpitch: usize,
+        src: *const c_void,
+        spitch: usize,
+        width: usize,
+        height: usize,
+        kind: cuvs_sys::cudaMemcpyKind,
+        stream: cuvs_sys::cudaStream_t,
+    ) -> cuvs_sys::cudaError_t;
     fn cudaEventCreate(event: *mut CudaEventHandle) -> cuvs_sys::cudaError_t;
     fn cudaEventDestroy(event: CudaEventHandle) -> cuvs_sys::cudaError_t;
     fn cudaEventRecord(
@@ -27,6 +39,11 @@ unsafe extern "C" {
         stream: cuvs_sys::cudaStream_t,
     ) -> cuvs_sys::cudaError_t;
     fn cudaEventSynchronize(event: CudaEventHandle) -> cuvs_sys::cudaError_t;
+    fn cudaEventElapsedTime(
+        ms: *mut f32,
+        start: CudaEventHandle,
+        end: CudaEventHandle,
+    ) -> cuvs_sys::cudaError_t;
 }
 
 pub(crate) struct CuvsIvfPqIndex {
@@ -69,13 +86,6 @@ impl MatrixBuffer<'_> {
                     Error::io(format!("failed to create borrowed matrix view: {error}"))
                 }),
             Self::Owned(array) => Ok(array.view()),
-        }
-    }
-
-    pub(crate) fn rows(&self) -> usize {
-        match self {
-            Self::Borrowed { rows, .. } => *rows,
-            Self::Owned(array) => array.nrows(),
         }
     }
 }
@@ -290,6 +300,75 @@ impl<T: DlElement> Drop for DeviceTensor<T> {
     }
 }
 
+pub(crate) struct RegisteredHostBuffer {
+    ptr: *mut c_void,
+    original_bytes: usize,
+}
+
+// CUDA host registration owns a process-local address range; unregistering it
+// from the consumer task is safe because CUDA runtime calls are thread-safe.
+unsafe impl Send for RegisteredHostBuffer {}
+
+impl RegisteredHostBuffer {
+    pub(crate) fn try_new<T>(slice: &[T]) -> Result<Self> {
+        let original_bytes = std::mem::size_of_val(slice);
+        if original_bytes == 0 {
+            return Ok(Self {
+                ptr: ptr::null_mut(),
+                original_bytes: 0,
+            });
+        }
+
+        let page_size = page_size()?;
+        let start = slice.as_ptr() as usize;
+        let end = start
+            .checked_add(original_bytes)
+            .ok_or_else(|| Error::io("registered host buffer size overflow"))?;
+        let aligned_start = start & !(page_size - 1);
+        let aligned_end = end
+            .checked_add(page_size - 1)
+            .ok_or_else(|| Error::io("registered host buffer alignment overflow"))?
+            & !(page_size - 1);
+        let bytes = aligned_end - aligned_start;
+        let ptr = aligned_start as *mut c_void;
+
+        check_cuda(
+            unsafe { cudaHostRegister(ptr, bytes, 0) },
+            "register host buffer",
+        )?;
+        Ok(Self {
+            ptr,
+            original_bytes,
+        })
+    }
+
+    pub(crate) fn original_bytes(&self) -> usize {
+        self.original_bytes
+    }
+}
+
+impl Drop for RegisteredHostBuffer {
+    fn drop(&mut self) {
+        if !self.ptr.is_null() {
+            let _ = unsafe { cudaHostUnregister(self.ptr) };
+        }
+    }
+}
+
+fn page_size() -> Result<usize> {
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if page_size <= 0 {
+        return Err(Error::io("failed to resolve system page size"));
+    }
+    let page_size = page_size as usize;
+    if !page_size.is_power_of_two() {
+        return Err(Error::io(format!(
+            "system page size {page_size} is not a power of two"
+        )));
+    }
+    Ok(page_size)
+}
+
 pub(crate) struct PinnedHostBuffer<T> {
     ptr: *mut T,
     len: usize,
@@ -340,18 +419,6 @@ impl<T: Copy> PinnedHostBuffer<T> {
         }
         Ok(&mut self.as_mut_slice()[..len])
     }
-
-    pub(crate) fn copy_from_slice(&mut self, src: &[T]) -> Result<()> {
-        if src.len() > self.len {
-            return Err(Error::io(format!(
-                "pinned host buffer length {} is smaller than source length {}",
-                self.len,
-                src.len()
-            )));
-        }
-        self.prefix_mut(src.len())?.copy_from_slice(src);
-        Ok(())
-    }
 }
 
 impl<T> Drop for PinnedHostBuffer<T> {
@@ -385,6 +452,15 @@ impl CudaEvent {
             unsafe { cudaEventSynchronize(self.raw) },
             "synchronize CUDA event",
         )
+    }
+
+    pub(crate) fn elapsed_since(&self, start: &Self) -> Result<std::time::Duration> {
+        let mut ms = 0.0f32;
+        check_cuda(
+            unsafe { cudaEventElapsedTime(&mut ms, start.raw, self.raw) },
+            "measure CUDA event elapsed time",
+        )?;
+        Ok(std::time::Duration::from_secs_f64(ms as f64 / 1000.0))
     }
 }
 
@@ -421,6 +497,38 @@ pub(crate) fn check_cuda(status: cuvs_sys::cudaError_t, context: &str) -> Result
     } else {
         Err(Error::io(format!("CUDA failed to {context}: {status:?}")))
     }
+}
+
+pub(crate) fn enable_rmm_pool_from_env() -> Result<()> {
+    let Some(config) = std::env::var("LANCE_CUVS_RMM_POOL").ok() else {
+        return Ok(());
+    };
+    let (initial, max) = match config.split_once(',') {
+        Some((initial, max)) => (
+            initial.parse::<i32>().map_err(|error| {
+                Error::invalid_input(format!(
+                    "invalid LANCE_CUVS_RMM_POOL initial percent '{initial}': {error}"
+                ))
+            })?,
+            max.parse::<i32>().map_err(|error| {
+                Error::invalid_input(format!(
+                    "invalid LANCE_CUVS_RMM_POOL max percent '{max}': {error}"
+                ))
+            })?,
+        ),
+        None => {
+            let percent = config.parse::<i32>().map_err(|error| {
+                Error::invalid_input(format!(
+                    "invalid LANCE_CUVS_RMM_POOL percent '{config}': {error}"
+                ))
+            })?;
+            (percent, percent)
+        }
+    };
+    check_cuvs(
+        unsafe { cuvs_sys::cuvsRMMPoolMemoryResourceEnable(initial, max, false) },
+        "enable RMM pool memory resource",
+    )
 }
 
 pub(crate) fn cuvs_distance_type(metric_type: DistanceType) -> Result<cuvs_sys::cuvsDistanceType> {
@@ -518,20 +626,48 @@ pub(crate) fn copy_tensor_to_host_f32_2d(
         )));
     }
     let mut array = Array2::<f32>::zeros((shape[0], shape[1]));
-    check_cuda(
-        unsafe {
-            cuvs_sys::cudaMemcpyAsync(
-                array.as_mut_ptr() as *mut _,
-                tensor.dl_tensor.data,
-                tensor_num_bytes(tensor),
-                cuvs_sys::cudaMemcpyKind_cudaMemcpyDefault,
-                resources
-                    .get_cuda_stream()
-                    .map_err(|e| Error::io(e.to_string()))?,
-            )
-        },
-        "copy tensor to host",
-    )?;
+    let stream = resources
+        .get_cuda_stream()
+        .map_err(|e| Error::io(e.to_string()))?;
+    if tensor.dl_tensor.strides.is_null() {
+        check_cuda(
+            unsafe {
+                cuvs_sys::cudaMemcpyAsync(
+                    array.as_mut_ptr() as *mut _,
+                    tensor.dl_tensor.data,
+                    tensor_num_bytes(tensor),
+                    cuvs_sys::cudaMemcpyKind_cudaMemcpyDefault,
+                    stream,
+                )
+            },
+            "copy tensor to host",
+        )?;
+    } else {
+        let row_stride = unsafe { *tensor.dl_tensor.strides } as usize;
+        let col_stride = unsafe { *tensor.dl_tensor.strides.add(1) } as usize;
+        if col_stride != 1 {
+            return Err(Error::not_supported(format!(
+                "copying 2D tensors with non-unit column stride is not supported: strides=({}, {})",
+                row_stride, col_stride
+            )));
+        }
+        let row_bytes = shape[1] * std::mem::size_of::<f32>();
+        check_cuda(
+            unsafe {
+                cudaMemcpy2DAsync(
+                    array.as_mut_ptr().cast::<c_void>(),
+                    row_bytes,
+                    tensor.dl_tensor.data,
+                    row_stride * std::mem::size_of::<f32>(),
+                    row_bytes,
+                    shape[0],
+                    cuvs_sys::cudaMemcpyKind_cudaMemcpyDefault,
+                    stream,
+                )
+            },
+            "copy strided tensor to host",
+        )?;
+    }
     resources
         .sync_stream()
         .map_err(|e| Error::io(e.to_string()))?;

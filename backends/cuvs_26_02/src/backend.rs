@@ -2,40 +2,44 @@
 // SPDX-FileCopyrightText: Copyright The Lance Authors
 
 use crate::cuda::{
-    CudaEvent, CuvsIvfPqIndex, DeviceTensor, HostTensorView, PinnedHostBuffer, check_cuvs,
-    copy_tensor_to_host_f32_2d, copy_tensor_to_host_f32_3d, create_index_params,
-    destroy_index_params, ivf_centroids_from_host, make_tensor_view, matrix_from_vectors,
-    pq_codebook_from_host,
+    CudaEvent, CuvsIvfPqIndex, DeviceTensor, HostTensorView, MatrixBuffer, PinnedHostBuffer,
+    RegisteredHostBuffer, check_cuvs, copy_tensor_to_host_f32_2d, copy_tensor_to_host_f32_3d,
+    create_index_params, destroy_index_params, enable_rmm_pool_from_env, ivf_centroids_from_host,
+    make_tensor_view, matrix_from_vectors, pq_codebook_from_host,
 };
-use arrow::compute::filter;
+use arrow::compute::{concat_batches, filter};
 use arrow_array::cast::AsArray;
-use arrow_array::{
-    Array, ArrayRef, FixedSizeListArray, ListArray, RecordBatch, UInt8Array, UInt32Array,
-};
-use arrow_buffer::{OffsetBuffer, ScalarBuffer};
+use arrow_array::types::Float32Type;
+use arrow_array::{Array, ArrayRef, FixedSizeListArray, RecordBatch, UInt8Array, UInt32Array};
 use arrow_schema::{DataType, Field, Schema as ArrowSchema};
 use cuvs::Resources;
-use futures::{FutureExt, SinkExt, TryStreamExt, channel::mpsc, future::LocalBoxFuture};
+use futures::lock::Mutex;
+use futures::{
+    FutureExt, SinkExt, StreamExt, TryStreamExt, channel::mpsc, future::LocalBoxFuture, stream,
+};
 use lance::dataset::Dataset;
+use lance::index::vector::PartitionArtifactBuilder;
 use lance::index::vector::utils::infer_vector_dim;
 use lance_arrow::FixedSizeListArrayExt;
 use lance_core::{Error, ROW_ID, Result};
-use lance_file::version::LanceFileVersion;
-use lance_file::writer::{FileWriter, FileWriterOptions};
-use lance_index::vector::ivf::shuffler::IvfShuffler;
 use lance_index::vector::utils::is_finite;
 use lance_index::vector::{PART_ID_COLUMN, PQ_CODE_COLUMN};
-use lance_io::local::to_local_path;
 use lance_linalg::distance::DistanceType;
 use log::warn;
+use ndarray::Array2;
 use std::collections::HashMap;
+use std::ops::Range;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 const PARTITION_ARTIFACT_METADATA_FILE_NAME: &str = "metadata.lance";
-const PARTITION_ARTIFACT_FILE_VERSION: &str = "2.2";
-const PARTITION_ARTIFACT_UNSORTED_FILE_NAME: &str = "unsorted.lance";
-const PARTITION_ARTIFACT_SHUFFLE_BATCHES_PER_FILE: usize = 16;
 const PIPELINE_SLOTS: usize = 2;
+const DEFAULT_SCAN_FRAGMENT_READAHEAD: usize = 0;
+const DEFAULT_SCAN_IO_BUFFER_SIZE: u64 = 16 * 1024 * 1024 * 1024;
+const DEFAULT_SCAN_BATCH_READAHEAD: usize = 32;
+const DEFAULT_PREPARE_WORKERS: usize = 1;
+const TRAINING_SAMPLE_CHUNK_ROWS: usize = 8 * 1024;
+const TRAINING_SAMPLE_BATCH_READAHEAD: usize = 64;
 
 /// A trained cuVS IVF_PQ model that can be reused for artifact builds.
 ///
@@ -183,6 +187,7 @@ impl VectorBuildBackend for CuvsVectorBuildBackend {
         async move {
             match params.kind {
                 VectorIndexKind::IvfPq(build_params) => {
+                    let train_start = Instant::now();
                     let trained = train_ivf_pq(
                         dataset,
                         &params.column,
@@ -195,6 +200,11 @@ impl VectorBuildBackend for CuvsVectorBuildBackend {
                         params.filter_nan,
                     )
                     .await?;
+                    eprintln!(
+                        "cuVS train_ivf_pq time: {:.3}s",
+                        train_start.elapsed().as_secs_f64()
+                    );
+                    let artifact_start = Instant::now();
                     let files = assign_ivf_pq_to_artifact(
                         dataset,
                         &params.column,
@@ -205,6 +215,11 @@ impl VectorBuildBackend for CuvsVectorBuildBackend {
                         None,
                     )
                     .await?;
+                    eprintln!(
+                        "cuVS assign_ivf_pq_to_artifact time: {:.3}s files={}",
+                        artifact_start.elapsed().as_secs_f64(),
+                        files.len()
+                    );
                     Ok(VectorIndexBuildOutput::PartitionArtifact(
                         PartitionArtifactBuildOutput {
                             artifact_uri: params.artifact_uri,
@@ -286,116 +301,6 @@ fn vector_column_to_fsl(batch: &RecordBatch, column: &str) -> Result<FixedSizeLi
     }
 }
 
-fn build_metadata_batch(
-    ivf_centroids: &FixedSizeListArray,
-    pq_codebook: &FixedSizeListArray,
-) -> Result<RecordBatch> {
-    let ivf_offsets = OffsetBuffer::new(ScalarBuffer::from(vec![0i32, ivf_centroids.len() as i32]));
-    let pq_offsets = OffsetBuffer::new(ScalarBuffer::from(vec![0i32, pq_codebook.len() as i32]));
-    let ivf_list = ListArray::new(
-        Arc::new(Field::new(
-            "_ivf_centroids_item",
-            ivf_centroids.data_type().clone(),
-            false,
-        )),
-        ivf_offsets,
-        Arc::new(ivf_centroids.clone()),
-        None,
-    );
-    let pq_list = ListArray::new(
-        Arc::new(Field::new(
-            "_pq_codebook_item",
-            pq_codebook.data_type().clone(),
-            false,
-        )),
-        pq_offsets,
-        Arc::new(pq_codebook.clone()),
-        None,
-    );
-    let schema = Arc::new(ArrowSchema::new(vec![
-        Field::new("_ivf_centroids", ivf_list.data_type().clone(), false),
-        Field::new("_pq_codebook", pq_list.data_type().clone(), false),
-    ]));
-    Ok(RecordBatch::try_new(
-        schema,
-        vec![Arc::new(ivf_list), Arc::new(pq_list)],
-    )?)
-}
-
-fn metadata_writer_options() -> Result<FileWriterOptions> {
-    Ok(FileWriterOptions {
-        format_version: Some(
-            PARTITION_ARTIFACT_FILE_VERSION
-                .parse::<LanceFileVersion>()
-                .map_err(|error| {
-                    Error::invalid_input(format!(
-                        "invalid partition artifact file version '{}': {}",
-                        PARTITION_ARTIFACT_FILE_VERSION, error
-                    ))
-                })?,
-        ),
-        ..Default::default()
-    })
-}
-
-async fn write_partition_artifact_metadata(
-    artifact_uri: &str,
-    trained: &TrainedIvfPqIndex,
-    storage_options: Option<&HashMap<String, String>>,
-) -> Result<()> {
-    let registry = Arc::new(lance_io::object_store::ObjectStoreRegistry::default());
-    let params = if let Some(storage_options) = storage_options {
-        lance_io::object_store::ObjectStoreParams {
-            storage_options_accessor: Some(Arc::new(
-                lance_io::object_store::StorageOptionsAccessor::with_static_options(
-                    storage_options.clone(),
-                ),
-            )),
-            ..Default::default()
-        }
-    } else {
-        lance_io::object_store::ObjectStoreParams::default()
-    };
-    let (object_store, root_dir) =
-        lance::io::ObjectStore::from_uri_and_params(registry, artifact_uri, &params)
-            .await
-            .map_err(|error| Error::io(error.to_string()))?;
-    let path = root_dir.child(PARTITION_ARTIFACT_METADATA_FILE_NAME);
-    let batch = build_metadata_batch(&trained.ivf_centroids, &trained.pq_codebook)?;
-    let mut writer = FileWriter::try_new(
-        object_store.create(&path).await?,
-        lance_core::datatypes::Schema::try_from(batch.schema().as_ref())?,
-        metadata_writer_options()?,
-    )?;
-    writer.add_schema_metadata(
-        "lance:index_build:artifact_version".to_string(),
-        "1".to_string(),
-    );
-    writer.add_schema_metadata(
-        "lance:index_build:distance_type".to_string(),
-        trained.metric_type.to_string(),
-    );
-    writer.add_schema_metadata(
-        "lance:index_build:num_partitions".to_string(),
-        trained.num_partitions.to_string(),
-    );
-    writer.add_schema_metadata(
-        "lance:index_build:num_sub_vectors".to_string(),
-        trained.num_sub_vectors.to_string(),
-    );
-    writer.add_schema_metadata(
-        "lance:index_build:num_bits".to_string(),
-        trained.num_bits.to_string(),
-    );
-    writer.add_schema_metadata(
-        "lance:index_build:dimension".to_string(),
-        trained.dimension.to_string(),
-    );
-    writer.write_batch(&batch).await?;
-    writer.finish().await?;
-    Ok(())
-}
-
 fn build_partition_batch(
     row_ids: Arc<dyn Array>,
     partitions: &[u32],
@@ -438,7 +343,6 @@ fn build_partition_batch(
 }
 
 struct TransformSlot {
-    input_host: PinnedHostBuffer<f32>,
     input_device: DeviceTensor<f32>,
     labels_host: PinnedHostBuffer<u32>,
     labels_device: DeviceTensor<u32>,
@@ -448,8 +352,92 @@ struct TransformSlot {
     h2d_done: CudaEvent,
     transform_done: CudaEvent,
     output_ready: CudaEvent,
+    input_vectors: Option<FixedSizeListArray>,
+    input_matrix: Option<Array2<f32>>,
+    input_registration: Option<RegisteredHostBuffer>,
     row_ids: Option<Arc<dyn Array>>,
     rows: usize,
+}
+
+enum PreparedMatrix {
+    F32Arrow {
+        vectors: FixedSizeListArray,
+        rows: usize,
+        dimension: usize,
+    },
+    Owned(Array2<f32>),
+}
+
+impl PreparedMatrix {
+    fn rows(&self) -> usize {
+        match self {
+            Self::F32Arrow { rows, .. } => *rows,
+            Self::Owned(array) => array.nrows(),
+        }
+    }
+
+    fn dimension(&self) -> usize {
+        match self {
+            Self::F32Arrow { dimension, .. } => *dimension,
+            Self::Owned(array) => array.ncols(),
+        }
+    }
+
+    fn input_slice(&self) -> Result<&[f32]> {
+        match self {
+            Self::F32Arrow { vectors, .. } => {
+                let values = vectors.values().as_primitive::<Float32Type>();
+                Ok(values.values().as_ref())
+            }
+            Self::Owned(array) => array
+                .as_slice_memory_order()
+                .ok_or_else(|| Error::io("transform matrix is not contiguous")),
+        }
+    }
+}
+
+struct PreparedTransformBatch {
+    row_ids: Arc<dyn Array>,
+    matrix: PreparedMatrix,
+    input_registration: Option<RegisteredHostBuffer>,
+}
+
+struct DrainedTransformBatch {
+    batch: RecordBatch,
+    h2d: Duration,
+    transform: Duration,
+    d2h: Duration,
+    sync: Duration,
+    build_batch: Duration,
+}
+
+#[derive(Default)]
+struct LaunchTimings {
+    h2d_enqueue: Duration,
+    transform_call: Duration,
+    d2h_enqueue: Duration,
+}
+
+#[derive(Default)]
+struct ArtifactScannerStats {
+    input_batches: usize,
+    input_rows: usize,
+    scan_wait: Duration,
+    send: Duration,
+}
+
+#[derive(Default)]
+struct ArtifactPrepareStats {
+    workers: usize,
+    input_batches: usize,
+    input_rows: usize,
+    raw_wait: Duration,
+    send: Duration,
+    vector: Duration,
+    filter: Duration,
+    matrix: Duration,
+    register: Duration,
+    registered_bytes: usize,
 }
 
 impl TransformSlot {
@@ -460,7 +448,6 @@ impl TransformSlot {
         code_width: usize,
     ) -> Result<Self> {
         Ok(Self {
-            input_host: PinnedHostBuffer::try_new(max_rows * dimension)?,
             input_device: DeviceTensor::try_new(resources, &[max_rows, dimension])?,
             labels_host: PinnedHostBuffer::try_new(max_rows)?,
             labels_device: DeviceTensor::try_new(resources, &[max_rows])?,
@@ -470,6 +457,9 @@ impl TransformSlot {
             h2d_done: CudaEvent::try_new()?,
             transform_done: CudaEvent::try_new()?,
             output_ready: CudaEvent::try_new()?,
+            input_vectors: None,
+            input_matrix: None,
+            input_registration: None,
             row_ids: None,
             rows: 0,
         })
@@ -483,25 +473,40 @@ impl TransformSlot {
         &mut self,
         trained: &TrainedIvfPqIndex,
         stream: cuvs_sys::cudaStream_t,
-        row_ids: Arc<dyn Array>,
-        matrix: &[f32],
-        rows: usize,
-        dimension: usize,
-    ) -> Result<()> {
+        prepared: PreparedTransformBatch,
+    ) -> Result<LaunchTimings> {
+        let mut timings = LaunchTimings::default();
         let code_width = trained.pq_code_width();
-        self.input_host.copy_from_slice(matrix)?;
+        let row_ids = prepared.row_ids;
+        let matrix = prepared.matrix;
+        let rows = matrix.rows();
+        let dimension = matrix.dimension();
+        let input_slice = matrix.input_slice()?;
+
         self.input_device.set_shape(&[rows, dimension])?;
         self.labels_device.set_shape(&[rows])?;
         self.codes_device.set_shape(&[rows, code_width])?;
         self.rows = rows;
         self.row_ids = Some(row_ids);
+        self.input_registration = prepared.input_registration;
 
         self.h2d_start.record(stream)?;
-        self.input_device.copy_from_host_async(
-            &trained.resources,
-            self.input_host.prefix(rows * dimension)?,
-        )?;
+        let h2d_enqueue_start = Instant::now();
+        self.input_device
+            .copy_from_host_async(&trained.resources, input_slice)?;
+        timings.h2d_enqueue += h2d_enqueue_start.elapsed();
         self.h2d_done.record(stream)?;
+        match matrix {
+            PreparedMatrix::F32Arrow { vectors, .. } => {
+                self.input_vectors = Some(vectors);
+                self.input_matrix = None;
+            }
+            PreparedMatrix::Owned(array) => {
+                self.input_vectors = None;
+                self.input_matrix = Some(array);
+            }
+        }
+        let transform_call_start = Instant::now();
         check_cuvs(
             unsafe {
                 cuvs_sys::cuvsIvfPqTransform(
@@ -514,96 +519,342 @@ impl TransformSlot {
             },
             "transform vectors with IVF_PQ",
         )?;
+        timings.transform_call += transform_call_start.elapsed();
         self.transform_done.record(stream)?;
+        let d2h_enqueue_start = Instant::now();
         self.labels_device
             .copy_to_host_async(&trained.resources, self.labels_host.prefix_mut(rows)?)?;
         self.codes_device.copy_to_host_async(
             &trained.resources,
             self.codes_host.prefix_mut(rows * code_width)?,
         )?;
+        timings.d2h_enqueue += d2h_enqueue_start.elapsed();
         self.output_ready.record(stream)?;
-        Ok(())
+        Ok(timings)
     }
 
-    fn drain_to_batch(&mut self, code_width: usize) -> Result<Option<RecordBatch>> {
+    fn drain_to_batch(&mut self, code_width: usize) -> Result<Option<DrainedTransformBatch>> {
         if !self.has_pending_output() {
             return Ok(None);
         }
 
+        let sync_start = Instant::now();
         self.output_ready.synchronize()?;
+        let sync = sync_start.elapsed();
+        let h2d = self.h2d_done.elapsed_since(&self.h2d_start)?;
+        let transform = self.transform_done.elapsed_since(&self.h2d_done)?;
+        let d2h = self.output_ready.elapsed_since(&self.transform_done)?;
+        self.input_registration = None;
+        self.input_vectors = None;
+        self.input_matrix = None;
         let row_ids = self
             .row_ids
             .take()
             .ok_or_else(|| Error::io("transform slot is missing row ids"))?;
+        let build_batch_start = Instant::now();
         let batch = build_partition_batch(
             row_ids,
             self.labels_host.prefix(self.rows)?,
             self.codes_host.prefix(self.rows * code_width)?,
             code_width,
         )?;
+        let build_batch = build_batch_start.elapsed();
         self.rows = 0;
-        Ok(Some(batch))
+        Ok(Some(DrainedTransformBatch {
+            batch,
+            h2d,
+            transform,
+            d2h,
+            sync,
+            build_batch,
+        }))
     }
 }
 
-async fn for_each_transformed_batch<F, Fut>(
+#[derive(Default)]
+struct ArtifactBuildStats {
+    scanner_tasks: usize,
+    prepare_workers: usize,
+    input_batches: usize,
+    input_rows: usize,
+    prepared_batches: usize,
+    prepared_rows: usize,
+    output_batches: usize,
+    output_rows: usize,
+    scan_wait: Duration,
+    raw_send: Duration,
+    raw_wait: Duration,
+    drain: Duration,
+    send: Duration,
+    prepare_send: Duration,
+    vector: Duration,
+    filter: Duration,
+    matrix: Duration,
+    launch: Duration,
+    gpu_h2d: Duration,
+    gpu_transform: Duration,
+    gpu_d2h: Duration,
+    launch_h2d_enqueue: Duration,
+    launch_transform_call: Duration,
+    launch_d2h_enqueue: Duration,
+    drain_sync: Duration,
+    drain_build_batch: Duration,
+    register: Duration,
+    registered_bytes: usize,
+}
+
+impl ArtifactBuildStats {
+    fn merge_scanner(&mut self, scanner: ArtifactScannerStats) {
+        self.scanner_tasks += 1;
+        self.input_batches += scanner.input_batches;
+        self.input_rows += scanner.input_rows;
+        self.scan_wait += scanner.scan_wait;
+        self.raw_send += scanner.send;
+    }
+
+    fn merge_prepare(&mut self, prepare: ArtifactPrepareStats) {
+        self.prepare_workers += prepare.workers;
+        self.prepared_batches += prepare.input_batches;
+        self.prepared_rows += prepare.input_rows;
+        self.raw_wait += prepare.raw_wait;
+        self.prepare_send += prepare.send;
+        self.vector += prepare.vector;
+        self.filter += prepare.filter;
+        self.matrix += prepare.matrix;
+        self.register += prepare.register;
+        self.registered_bytes += prepare.registered_bytes;
+    }
+
+    fn record_output(&mut self, batch: &RecordBatch) {
+        self.output_batches += 1;
+        self.output_rows += batch.num_rows();
+    }
+
+    fn record_drained(&mut self, drained: &DrainedTransformBatch) {
+        self.record_output(&drained.batch);
+        self.gpu_h2d += drained.h2d;
+        self.gpu_transform += drained.transform;
+        self.gpu_d2h += drained.d2h;
+        self.drain_sync += drained.sync;
+        self.drain_build_batch += drained.build_batch;
+    }
+
+    fn record_launch_timings(&mut self, timings: LaunchTimings) {
+        self.launch_h2d_enqueue += timings.h2d_enqueue;
+        self.launch_transform_call += timings.transform_call;
+        self.launch_d2h_enqueue += timings.d2h_enqueue;
+    }
+
+    fn log(&self) {
+        eprintln!(
+            "cuVS artifact stages: scanner_tasks={} prepare_workers={} input_batches={} input_rows={} prepared_batches={} prepared_rows={} output_batches={} output_rows={} scan_wait_s={:.3} raw_send_s={:.3} raw_wait_s={:.3} drain_s={:.3} send_s={:.3} prepare_send_s={:.3} vector_s={:.3} filter_s={:.3} matrix_s={:.3} launch_s={:.3}",
+            self.scanner_tasks,
+            self.prepare_workers,
+            self.input_batches,
+            self.input_rows,
+            self.prepared_batches,
+            self.prepared_rows,
+            self.output_batches,
+            self.output_rows,
+            secs(self.scan_wait),
+            secs(self.raw_send),
+            secs(self.raw_wait),
+            secs(self.drain),
+            secs(self.send),
+            secs(self.prepare_send),
+            secs(self.vector),
+            secs(self.filter),
+            secs(self.matrix),
+            secs(self.launch),
+        );
+        eprintln!(
+            "cuVS artifact h2d registration: register_s={:.3} registered_gib={:.3}",
+            secs(self.register),
+            self.registered_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+        );
+        eprintln!(
+            "cuVS artifact gpu events: h2d_s={:.3} transform_s={:.3} d2h_s={:.3}",
+            secs(self.gpu_h2d),
+            secs(self.gpu_transform),
+            secs(self.gpu_d2h),
+        );
+        eprintln!(
+            "cuVS artifact launch cpu: h2d_enqueue_s={:.3} transform_call_s={:.3} d2h_enqueue_s={:.3}",
+            secs(self.launch_h2d_enqueue),
+            secs(self.launch_transform_call),
+            secs(self.launch_d2h_enqueue),
+        );
+        eprintln!(
+            "cuVS artifact drain cpu: sync_s={:.3} build_batch_s={:.3}",
+            secs(self.drain_sync),
+            secs(self.drain_build_batch),
+        );
+        eprintln!("cuVS artifact max rss: {} KiB", max_rss_kib());
+    }
+}
+
+fn secs(duration: Duration) -> f64 {
+    duration.as_secs_f64()
+}
+
+fn max_rss_kib() -> i64 {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+    let status = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+    if status == 0 {
+        unsafe { usage.assume_init().ru_maxrss }
+    } else {
+        -1
+    }
+}
+
+fn prepare_workers_from_env() -> usize {
+    std::env::var("LANCE_CUVS_PREPARE_WORKERS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|workers| *workers > 0)
+        .unwrap_or(DEFAULT_PREPARE_WORKERS)
+}
+
+fn scan_fragment_readahead_from_env() -> usize {
+    std::env::var("LANCE_CUVS_SCAN_FRAGMENT_READAHEAD")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_SCAN_FRAGMENT_READAHEAD)
+}
+
+fn scan_batch_readahead_from_env() -> usize {
+    std::env::var("LANCE_CUVS_SCAN_BATCH_READAHEAD")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_SCAN_BATCH_READAHEAD)
+}
+
+fn training_sample_ranges(num_rows: usize, sample_rows: usize) -> Vec<Range<u64>> {
+    let sample_rows = sample_rows.min(num_rows);
+    if sample_rows == 0 {
+        return Vec::new();
+    }
+    if sample_rows == num_rows {
+        return vec![0..num_rows as u64];
+    }
+
+    let chunk_rows = TRAINING_SAMPLE_CHUNK_ROWS.min(sample_rows);
+    let num_chunks = sample_rows.div_ceil(chunk_rows);
+    let mut remaining = sample_rows;
+    let mut ranges = Vec::with_capacity(num_chunks);
+    for chunk_idx in 0..num_chunks {
+        let rows = chunk_rows.min(remaining);
+        remaining -= rows;
+        let max_start = num_rows - rows;
+        let start = if num_chunks == 1 {
+            max_start / 2
+        } else {
+            ((chunk_idx as u128 * max_start as u128) / (num_chunks - 1) as u128) as usize
+        };
+        ranges.push(start as u64..(start + rows) as u64);
+    }
+    ranges
+}
+
+async fn sample_training_vectors(
     dataset: &Dataset,
     column: &str,
-    trained: &TrainedIvfPqIndex,
+    sample_rows: usize,
+) -> Result<FixedSizeListArray> {
+    let num_rows = dataset.count_rows(None).await?;
+    if num_rows == 0 {
+        return Err(Error::invalid_input(
+            "cuVS training requires at least one training vector",
+        ));
+    }
+
+    let ranges = training_sample_ranges(num_rows, sample_rows);
+    let projection = Arc::new(dataset.schema().project(&[column])?);
+    let stream = dataset.take_scan(
+        Box::pin(stream::iter(ranges.into_iter().map(Ok))),
+        projection,
+        TRAINING_SAMPLE_BATCH_READAHEAD,
+    );
+    let batches = stream.try_collect::<Vec<_>>().await?;
+    let Some(schema) = batches.first().map(RecordBatch::schema) else {
+        return Err(Error::invalid_input(
+            "cuVS training sample did not return any vectors",
+        ));
+    };
+    let batch = concat_batches(&schema, &batches)?;
+    Ok(vector_column_to_fsl(&batch, column)?)
+}
+
+async fn scan_transform_batches(
+    dataset: Dataset,
+    column: String,
     batch_size: usize,
     filter_nan: bool,
-    mut on_batch: F,
-) -> Result<()>
-where
-    F: FnMut(RecordBatch) -> Fut,
-    Fut: std::future::Future<Output = Result<()>>,
-{
-    let code_width = trained.pq_code_width();
+    mut raw_tx: mpsc::Sender<RecordBatch>,
+) -> Result<ArtifactScannerStats> {
     let mut scanner = dataset.scan();
-    scanner.project(&[column])?;
+    scanner.project(&[&column])?;
     if dataset
         .schema()
-        .field(column)
+        .field(&column)
         .is_some_and(|field| field.nullable && filter_nan)
     {
         scanner.filter(&format!("{column} is not null"))?;
     }
     scanner.with_row_id();
     scanner.batch_size(batch_size);
+    scanner.scan_in_order(false);
+    scanner.fragment_readahead(scan_fragment_readahead_from_env());
+    scanner.batch_readahead(scan_batch_readahead_from_env());
+    scanner.io_buffer_size(DEFAULT_SCAN_IO_BUFFER_SIZE);
     let mut stream = scanner.try_into_stream().await?;
-    let cuda_stream = trained
-        .resources
-        .get_cuda_stream()
-        .map_err(|error| Error::io(error.to_string()))?;
-    let mut slots = (0..PIPELINE_SLOTS)
-        .map(|_| {
-            TransformSlot::try_new(
-                &trained.resources,
-                batch_size,
-                trained.dimension,
-                code_width,
-            )
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let mut next_slot = 0usize;
+    let mut stats = ArtifactScannerStats::default();
 
     loop {
+        let scan_start = Instant::now();
         let Some(batch) = stream.try_next().await? else {
+            stats.scan_wait += scan_start.elapsed();
             break;
         };
-        let slot = &mut slots[next_slot];
-        if let Some(transformed) = slot.drain_to_batch(code_width)? {
-            on_batch(transformed).await?;
-        }
+        stats.scan_wait += scan_start.elapsed();
+        stats.input_batches += 1;
+        stats.input_rows += batch.num_rows();
 
-        let vectors = vector_column_to_fsl(&batch, column)?;
-        let row_ids = batch
-            .column_by_name(ROW_ID)
-            .ok_or_else(|| Error::invalid_input(format!("transform batch is missing {ROW_ID}")))?;
+        let send_start = Instant::now();
+        raw_tx
+            .send(batch)
+            .await
+            .map_err(|error| Error::io(format!("failed to forward raw batch: {error}")))?;
+        stats.send += send_start.elapsed();
+    }
+
+    Ok(stats)
+}
+
+fn prepare_transform_batch(
+    batch: RecordBatch,
+    column: &str,
+    filter_nan: bool,
+    stats: &mut ArtifactPrepareStats,
+) -> Result<Option<PreparedTransformBatch>> {
+    stats.input_batches += 1;
+    stats.input_rows += batch.num_rows();
+
+    let vector_start = Instant::now();
+    let vectors = vector_column_to_fsl(&batch, column)?;
+    let row_ids = batch
+        .column_by_name(ROW_ID)
+        .ok_or_else(|| Error::invalid_input(format!("transform batch is missing {ROW_ID}")))?;
+    stats.vector += vector_start.elapsed();
+
+    let filter_start = Instant::now();
+    let (filtered_row_ids, filtered_vectors) = if filter_nan {
         let finite_mask = is_finite(&vectors);
         let valid_rows = finite_mask.true_count();
         if valid_rows == 0 {
-            continue;
+            stats.filter += filter_start.elapsed();
+            return Ok(None);
         }
         if valid_rows != vectors.len() {
             warn!(
@@ -643,30 +894,249 @@ where
                 column,
             )?
         };
+        (filtered_row_ids, filtered_vectors)
+    } else {
+        (row_ids.clone(), vectors)
+    };
+    stats.filter += filter_start.elapsed();
 
-        let matrix = matrix_from_vectors(&filtered_vectors)?;
-        let matrix_view = matrix.view()?;
-        let input_slice = matrix_view
-            .as_slice_memory_order()
-            .ok_or_else(|| Error::io("transform matrix is not contiguous"))?;
+    let matrix_start = Instant::now();
+    let matrix = matrix_from_vectors(&filtered_vectors)?;
+    stats.matrix += matrix_start.elapsed();
 
-        slot.launch(
-            trained,
-            cuda_stream,
-            filtered_row_ids,
-            input_slice,
-            matrix.rows(),
-            matrix_view.ncols(),
-        )?;
+    let (prepared_matrix, input_registration) = match matrix {
+        MatrixBuffer::Borrowed { values, rows, cols } => {
+            let register_start = Instant::now();
+            let registration = match RegisteredHostBuffer::try_new(values) {
+                Ok(registration) => Some(registration),
+                Err(error) => {
+                    warn!(
+                        "failed to register host vector buffer for CUDA H2D; falling back to pageable memory: {error}"
+                    );
+                    None
+                }
+            };
+            stats.register += register_start.elapsed();
+            stats.registered_bytes += registration
+                .as_ref()
+                .map(RegisteredHostBuffer::original_bytes)
+                .unwrap_or_default();
+            (
+                PreparedMatrix::F32Arrow {
+                    vectors: filtered_vectors,
+                    rows,
+                    dimension: cols,
+                },
+                registration,
+            )
+        }
+        MatrixBuffer::Owned(array) => (PreparedMatrix::Owned(array), None),
+    };
+
+    Ok(Some(PreparedTransformBatch {
+        row_ids: filtered_row_ids,
+        matrix: prepared_matrix,
+        input_registration,
+    }))
+}
+
+async fn prepare_transform_batches(
+    column: String,
+    filter_nan: bool,
+    raw_rx: Arc<Mutex<mpsc::Receiver<RecordBatch>>>,
+    mut prepared_tx: mpsc::Sender<PreparedTransformBatch>,
+) -> Result<ArtifactPrepareStats> {
+    let mut stats = ArtifactPrepareStats {
+        workers: 1,
+        ..Default::default()
+    };
+
+    loop {
+        let raw_wait_start = Instant::now();
+        let batch = {
+            let mut raw_rx = raw_rx.lock().await;
+            raw_rx.next().await
+        };
+        stats.raw_wait += raw_wait_start.elapsed();
+
+        let Some(batch) = batch else {
+            break;
+        };
+        let column = column.clone();
+        let (prepared, batch_stats) = tokio::task::spawn_blocking(move || {
+            let mut batch_stats = ArtifactPrepareStats::default();
+            let prepared = prepare_transform_batch(batch, &column, filter_nan, &mut batch_stats)?;
+            Ok::<_, Error>((prepared, batch_stats))
+        })
+        .await
+        .map_err(|error| Error::io(format!("prepare transform blocking task failed: {error}")))??;
+        stats.input_batches += batch_stats.input_batches;
+        stats.input_rows += batch_stats.input_rows;
+        stats.vector += batch_stats.vector;
+        stats.filter += batch_stats.filter;
+        stats.matrix += batch_stats.matrix;
+        stats.register += batch_stats.register;
+        stats.registered_bytes += batch_stats.registered_bytes;
+
+        let Some(prepared) = prepared else {
+            continue;
+        };
+        let send_start = Instant::now();
+        prepared_tx
+            .send(prepared)
+            .await
+            .map_err(|error| Error::io(format!("failed to forward prepared batch: {error}")))?;
+        stats.send += send_start.elapsed();
+    }
+
+    Ok(stats)
+}
+
+async fn append_transformed_batches_to_artifact(
+    dataset: &Dataset,
+    column: &str,
+    trained: &TrainedIvfPqIndex,
+    batch_size: usize,
+    filter_nan: bool,
+    append_tx: &mut mpsc::Sender<Result<RecordBatch>>,
+) -> Result<()> {
+    let code_width = trained.pq_code_width();
+    let cuda_stream = trained
+        .resources
+        .get_cuda_stream()
+        .map_err(|error| Error::io(error.to_string()))?;
+    let mut slots = (0..PIPELINE_SLOTS)
+        .map(|_| {
+            TransformSlot::try_new(
+                &trained.resources,
+                batch_size,
+                trained.dimension,
+                code_width,
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let mut next_slot = 0usize;
+    let mut stats = ArtifactBuildStats::default();
+    let prepare_workers = prepare_workers_from_env();
+    if prepare_workers > 1 {
+        eprintln!(
+            "cuVS artifact prepare: using {} workers behind a single scanner",
+            prepare_workers
+        );
+    }
+    let (raw_tx, raw_rx) = mpsc::channel::<RecordBatch>(prepare_workers);
+    let raw_rx = Arc::new(Mutex::new(raw_rx));
+    let scanner_task = tokio::spawn(scan_transform_batches(
+        dataset.clone(),
+        column.to_string(),
+        batch_size,
+        filter_nan,
+        raw_tx,
+    ));
+    let (prepared_tx, mut prepared_rx) = mpsc::channel::<PreparedTransformBatch>(PIPELINE_SLOTS);
+    let prepare_tasks = (0..prepare_workers)
+        .map(|_| {
+            tokio::spawn(prepare_transform_batches(
+                column.to_string(),
+                filter_nan,
+                raw_rx.clone(),
+                prepared_tx.clone(),
+            ))
+        })
+        .collect::<Vec<_>>();
+    drop(prepared_tx);
+
+    while let Some(prepared) = prepared_rx.next().await {
+        let slot = &mut slots[next_slot];
+        let drain_start = Instant::now();
+        let transformed = if let Some(transformed) = slot.drain_to_batch(code_width)? {
+            stats.drain += drain_start.elapsed();
+            stats.record_drained(&transformed);
+            Some(transformed)
+        } else {
+            stats.drain += drain_start.elapsed();
+            None
+        };
+
+        let launch_start = Instant::now();
+        let launch_timings = slot.launch(trained, cuda_stream, prepared)?;
+        stats.launch += launch_start.elapsed();
+        stats.record_launch_timings(launch_timings);
+
+        if let Some(transformed) = transformed {
+            let send_start = Instant::now();
+            append_tx
+                .send(Ok(transformed.batch))
+                .await
+                .map_err(|error| {
+                    Error::io(format!("failed to forward transformed batch: {error}"))
+                })?;
+            stats.send += send_start.elapsed();
+        }
         next_slot = (next_slot + 1) % PIPELINE_SLOTS;
     }
+    for prepare_task in prepare_tasks {
+        let prepare_stats = prepare_task
+            .await
+            .map_err(|error| Error::io(format!("prepare transform task failed: {error}")))??;
+        stats.merge_prepare(prepare_stats);
+    }
+    let scanner_stats = scanner_task
+        .await
+        .map_err(|error| Error::io(format!("scanner transform task failed: {error}")))??;
+    stats.merge_scanner(scanner_stats);
 
     for slot in &mut slots {
+        let drain_start = Instant::now();
         if let Some(transformed) = slot.drain_to_batch(code_width)? {
-            on_batch(transformed).await?;
+            stats.drain += drain_start.elapsed();
+            stats.record_drained(&transformed);
+            let send_start = Instant::now();
+            append_tx
+                .send(Ok(transformed.batch))
+                .await
+                .map_err(|error| {
+                    Error::io(format!("failed to forward transformed batch: {error}"))
+                })?;
+            stats.send += send_start.elapsed();
+        } else {
+            stats.drain += drain_start.elapsed();
         }
     }
+    stats.log();
     Ok(())
+}
+
+async fn append_artifact_batches(
+    mut artifact: PartitionArtifactBuilder,
+    mut rx: mpsc::Receiver<Result<RecordBatch>>,
+) -> Result<Vec<String>> {
+    let mut batches = 0usize;
+    let mut rows = 0usize;
+    let mut append_time = Duration::default();
+    while let Some(batch) = rx.next().await {
+        let batch = batch?;
+        batches += 1;
+        rows += batch.num_rows();
+        let append_start = Instant::now();
+        artifact.append_batch(&batch).await?;
+        append_time += append_start.elapsed();
+    }
+
+    let finish_start = Instant::now();
+    let files = artifact
+        .finish(PARTITION_ARTIFACT_METADATA_FILE_NAME, None)
+        .await?;
+    let finish_time = finish_start.elapsed();
+    eprintln!(
+        "cuVS artifact append task: batches={} rows={} append_s={:.3} finish_s={:.3} files={}",
+        batches,
+        rows,
+        secs(append_time),
+        secs(finish_time),
+        files.len()
+    );
+    Ok(files)
 }
 
 /// Train an IVF_PQ model with cuVS and return Arrow-native training outputs.
@@ -728,25 +1198,20 @@ pub async fn train_ivf_pq(
         )));
     }
 
-    let num_rows = dataset.count_rows(None).await?;
-    if num_rows == 0 {
-        return Err(Error::invalid_input(
-            "cuVS training requires at least one training vector",
-        ));
-    }
-    let train_rows = num_rows
-        .min((num_partitions * sample_rate).max(256 * 256))
-        .max(1);
+    let train_rows = (num_partitions * sample_rate).max(256 * 256).max(1);
+    let sample_start = Instant::now();
+    let train_vectors = sample_training_vectors(dataset, column, train_rows).await?;
+    eprintln!(
+        "cuVS train sample time: {:.3}s rows={}",
+        sample_start.elapsed().as_secs_f64(),
+        train_vectors.len()
+    );
     let train_vectors = if filter_nan {
-        let batch = dataset.scan().project(&[column])?.try_into_batch().await?;
-        let vectors = vector_column_to_fsl(&batch, column)?;
-        let mask = is_finite(&vectors);
-        let filtered = filter(&vectors, &mask)?.as_fixed_size_list().clone();
+        let mask = is_finite(&train_vectors);
+        let filtered = filter(&train_vectors, &mask)?.as_fixed_size_list().clone();
         filtered.slice(0, train_rows.min(filtered.len()))
     } else {
-        let projection = dataset.schema().project(&[column])?;
-        let batch = dataset.sample(train_rows, &projection, None).await?;
-        vector_column_to_fsl(&batch, column)?
+        train_vectors
     };
     if train_vectors.is_empty() {
         return Err(Error::invalid_input(
@@ -755,6 +1220,7 @@ pub async fn train_ivf_pq(
     }
 
     let matrix = matrix_from_vectors(&train_vectors)?;
+    enable_rmm_pool_from_env()?;
     let resources = Resources::new().map_err(|error| Error::io(error.to_string()))?;
     let index = CuvsIvfPqIndex::try_new()?;
     let params = create_index_params(
@@ -866,78 +1332,39 @@ pub async fn assign_ivf_pq_to_artifact(
     filter_nan: bool,
     storage_options: Option<&HashMap<String, String>>,
 ) -> Result<Vec<String>> {
-    let registry = Arc::new(lance_io::object_store::ObjectStoreRegistry::default());
-    let params = if let Some(storage_options) = storage_options {
-        lance_io::object_store::ObjectStoreParams {
-            storage_options_accessor: Some(Arc::new(
-                lance_io::object_store::StorageOptionsAccessor::with_static_options(
-                    storage_options.clone(),
-                ),
-            )),
-            ..Default::default()
-        }
-    } else {
-        lance_io::object_store::ObjectStoreParams::default()
-    };
-    let (object_store, root_dir) =
-        lance::io::ObjectStore::from_uri_and_params(registry, artifact_uri, &params)
-            .await
-            .map_err(|error| Error::io(error.to_string()))?;
-    if !object_store.is_local() {
-        return Err(Error::not_supported(
-            "partition artifact builds currently require a local filesystem artifact_uri",
-        ));
+    let artifact = PartitionArtifactBuilder::try_new(
+        artifact_uri,
+        trained.num_partitions,
+        trained.pq_code_width(),
+        storage_options,
+    )
+    .await?;
+
+    let (mut append_tx, append_rx) = mpsc::channel::<Result<RecordBatch>>(PIPELINE_SLOTS);
+    let append_task = tokio::spawn(append_artifact_batches(artifact, append_rx));
+
+    let append_start = Instant::now();
+    let append_result = append_transformed_batches_to_artifact(
+        dataset,
+        column,
+        trained,
+        batch_size,
+        filter_nan,
+        &mut append_tx,
+    )
+    .await;
+    drop(append_tx);
+    if let Err(error) = append_result {
+        append_task.abort();
+        return Err(error);
     }
-
-    std::fs::create_dir_all(to_local_path(&root_dir))
-        .map_err(|error| Error::io(format!("failed to create artifact directory: {error}")))?;
-
-    let (tx, rx) = mpsc::channel::<Result<RecordBatch>>(PIPELINE_SLOTS);
-    let mut shuffler = IvfShuffler::try_new(
-        trained.num_partitions as u32,
-        Some(root_dir.clone()),
-        true,
-        None,
-    )?;
-    shuffler = shuffler.with_format_version(LanceFileVersion::V2_0);
-
-    let shuffle_task = tokio::spawn(async move {
-        shuffler.write_unsorted_stream(rx).await?;
-        shuffler
-            .write_partitioned_shuffles(PARTITION_ARTIFACT_SHUFFLE_BATCHES_PER_FILE, PIPELINE_SLOTS)
-            .await
-    });
-
-    let produce_result =
-        for_each_transformed_batch(dataset, column, trained, batch_size, filter_nan, |batch| {
-            let mut tx = tx.clone();
-            async move {
-                tx.send(Ok(batch)).await.map_err(|error| {
-                    Error::io(format!("failed to forward transformed batch: {error}"))
-                })
-            }
-        })
-        .await;
-    drop(tx);
-
-    produce_result?;
-    write_partition_artifact_metadata(artifact_uri, trained, storage_options).await?;
-
-    let mut files = shuffle_task
+    eprintln!(
+        "cuVS artifact append_transformed_batches time: {:.3}s",
+        append_start.elapsed().as_secs_f64()
+    );
+    let files = append_task
         .await
-        .map_err(|error| Error::io(format!("partition artifact shuffle task failed: {error}")))??;
-
-    let unsorted_path = root_dir.child(PARTITION_ARTIFACT_UNSORTED_FILE_NAME);
-    let unsorted_local_path = to_local_path(&unsorted_path);
-    if std::path::Path::new(&unsorted_local_path).exists() {
-        std::fs::remove_file(&unsorted_local_path).map_err(|error| {
-            Error::io(format!(
-                "failed to remove temporary unsorted buffer: {error}"
-            ))
-        })?;
-    }
-
-    files.push(PARTITION_ARTIFACT_METADATA_FILE_NAME.to_string());
+        .map_err(|error| Error::io(format!("partition artifact append task failed: {error}")))??;
     Ok(files)
 }
 
