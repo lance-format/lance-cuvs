@@ -29,6 +29,11 @@ unsafe extern "C" {
         stream: cuvs_sys::cudaStream_t,
     ) -> cuvs_sys::cudaError_t;
     fn cudaEventSynchronize(event: CudaEventHandle) -> cuvs_sys::cudaError_t;
+    fn cudaEventElapsedTime(
+        ms: *mut f32,
+        start: CudaEventHandle,
+        end: CudaEventHandle,
+    ) -> cuvs_sys::cudaError_t;
 }
 
 pub(crate) struct CuvsIvfPqIndex {
@@ -437,6 +442,15 @@ impl CudaEvent {
             unsafe { cudaEventSynchronize(self.raw) },
             "synchronize CUDA event",
         )
+    }
+
+    pub(crate) fn elapsed_since(&self, start: &Self) -> Result<std::time::Duration> {
+        let mut ms = 0.0f32;
+        check_cuda(
+            unsafe { cudaEventElapsedTime(&mut ms, start.raw, self.raw) },
+            "measure CUDA event elapsed time",
+        )?;
+        Ok(std::time::Duration::from_secs_f64(ms as f64 / 1000.0))
     }
 }
 

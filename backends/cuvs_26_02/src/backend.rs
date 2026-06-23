@@ -401,6 +401,13 @@ struct PreparedTransformBatch {
     input_registration: Option<RegisteredHostBuffer>,
 }
 
+struct DrainedTransformBatch {
+    batch: RecordBatch,
+    h2d: Duration,
+    transform: Duration,
+    d2h: Duration,
+}
+
 #[derive(Default)]
 struct ArtifactScannerStats {
     input_batches: usize,
@@ -509,12 +516,15 @@ impl TransformSlot {
         Ok(())
     }
 
-    fn drain_to_batch(&mut self, code_width: usize) -> Result<Option<RecordBatch>> {
+    fn drain_to_batch(&mut self, code_width: usize) -> Result<Option<DrainedTransformBatch>> {
         if !self.has_pending_output() {
             return Ok(None);
         }
 
         self.output_ready.synchronize()?;
+        let h2d = self.h2d_done.elapsed_since(&self.h2d_start)?;
+        let transform = self.transform_done.elapsed_since(&self.h2d_done)?;
+        let d2h = self.output_ready.elapsed_since(&self.transform_done)?;
         self.input_registration = None;
         self.input_vectors = None;
         self.input_matrix = None;
@@ -529,7 +539,12 @@ impl TransformSlot {
             code_width,
         )?;
         self.rows = 0;
-        Ok(Some(batch))
+        Ok(Some(DrainedTransformBatch {
+            batch,
+            h2d,
+            transform,
+            d2h,
+        }))
     }
 }
 
@@ -553,6 +568,9 @@ struct ArtifactBuildStats {
     filter: Duration,
     matrix: Duration,
     launch: Duration,
+    gpu_h2d: Duration,
+    gpu_transform: Duration,
+    gpu_d2h: Duration,
     register: Duration,
     registered_bytes: usize,
 }
@@ -584,6 +602,13 @@ impl ArtifactBuildStats {
         self.output_rows += batch.num_rows();
     }
 
+    fn record_drained(&mut self, drained: &DrainedTransformBatch) {
+        self.record_output(&drained.batch);
+        self.gpu_h2d += drained.h2d;
+        self.gpu_transform += drained.transform;
+        self.gpu_d2h += drained.d2h;
+    }
+
     fn log(&self) {
         eprintln!(
             "cuVS artifact stages: scanner_tasks={} prepare_workers={} input_batches={} input_rows={} prepared_batches={} prepared_rows={} output_batches={} output_rows={} scan_wait_s={:.3} raw_send_s={:.3} raw_wait_s={:.3} drain_s={:.3} send_s={:.3} prepare_send_s={:.3} vector_s={:.3} filter_s={:.3} matrix_s={:.3} launch_s={:.3}",
@@ -610,6 +635,12 @@ impl ArtifactBuildStats {
             "cuVS artifact h2d registration: register_s={:.3} registered_gib={:.3}",
             secs(self.register),
             self.registered_bytes as f64 / (1024.0 * 1024.0 * 1024.0),
+        );
+        eprintln!(
+            "cuVS artifact gpu events: h2d_s={:.3} transform_s={:.3} d2h_s={:.3}",
+            secs(self.gpu_h2d),
+            secs(self.gpu_transform),
+            secs(self.gpu_d2h),
         );
     }
 }
@@ -953,7 +984,7 @@ async fn append_transformed_batches_to_artifact(
         let drain_start = Instant::now();
         let transformed = if let Some(transformed) = slot.drain_to_batch(code_width)? {
             stats.drain += drain_start.elapsed();
-            stats.record_output(&transformed);
+            stats.record_drained(&transformed);
             Some(transformed)
         } else {
             stats.drain += drain_start.elapsed();
@@ -966,9 +997,12 @@ async fn append_transformed_batches_to_artifact(
 
         if let Some(transformed) = transformed {
             let send_start = Instant::now();
-            append_tx.send(Ok(transformed)).await.map_err(|error| {
-                Error::io(format!("failed to forward transformed batch: {error}"))
-            })?;
+            append_tx
+                .send(Ok(transformed.batch))
+                .await
+                .map_err(|error| {
+                    Error::io(format!("failed to forward transformed batch: {error}"))
+                })?;
             stats.send += send_start.elapsed();
         }
         next_slot = (next_slot + 1) % PIPELINE_SLOTS;
@@ -988,11 +1022,14 @@ async fn append_transformed_batches_to_artifact(
         let drain_start = Instant::now();
         if let Some(transformed) = slot.drain_to_batch(code_width)? {
             stats.drain += drain_start.elapsed();
-            stats.record_output(&transformed);
+            stats.record_drained(&transformed);
             let send_start = Instant::now();
-            append_tx.send(Ok(transformed)).await.map_err(|error| {
-                Error::io(format!("failed to forward transformed batch: {error}"))
-            })?;
+            append_tx
+                .send(Ok(transformed.batch))
+                .await
+                .map_err(|error| {
+                    Error::io(format!("failed to forward transformed batch: {error}"))
+                })?;
             stats.send += send_start.elapsed();
         } else {
             stats.drain += drain_start.elapsed();
