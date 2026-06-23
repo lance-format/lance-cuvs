@@ -499,6 +499,38 @@ pub(crate) fn check_cuda(status: cuvs_sys::cudaError_t, context: &str) -> Result
     }
 }
 
+pub(crate) fn enable_rmm_pool_from_env() -> Result<()> {
+    let Some(config) = std::env::var("LANCE_CUVS_RMM_POOL").ok() else {
+        return Ok(());
+    };
+    let (initial, max) = match config.split_once(',') {
+        Some((initial, max)) => (
+            initial.parse::<i32>().map_err(|error| {
+                Error::invalid_input(format!(
+                    "invalid LANCE_CUVS_RMM_POOL initial percent '{initial}': {error}"
+                ))
+            })?,
+            max.parse::<i32>().map_err(|error| {
+                Error::invalid_input(format!(
+                    "invalid LANCE_CUVS_RMM_POOL max percent '{max}': {error}"
+                ))
+            })?,
+        ),
+        None => {
+            let percent = config.parse::<i32>().map_err(|error| {
+                Error::invalid_input(format!(
+                    "invalid LANCE_CUVS_RMM_POOL percent '{config}': {error}"
+                ))
+            })?;
+            (percent, percent)
+        }
+    };
+    check_cuvs(
+        unsafe { cuvs_sys::cuvsRMMPoolMemoryResourceEnable(initial, max, false) },
+        "enable RMM pool memory resource",
+    )
+}
+
 pub(crate) fn cuvs_distance_type(metric_type: DistanceType) -> Result<cuvs_sys::cuvsDistanceType> {
     match metric_type {
         DistanceType::L2 => Ok(cuvs_sys::cuvsDistanceType::L2Expanded),

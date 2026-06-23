@@ -4,8 +4,8 @@
 use crate::cuda::{
     CudaEvent, CuvsIvfPqIndex, DeviceTensor, HostTensorView, MatrixBuffer, PinnedHostBuffer,
     RegisteredHostBuffer, check_cuvs, copy_tensor_to_host_f32_2d, copy_tensor_to_host_f32_3d,
-    create_index_params, destroy_index_params, ivf_centroids_from_host, make_tensor_view,
-    matrix_from_vectors, pq_codebook_from_host,
+    create_index_params, destroy_index_params, enable_rmm_pool_from_env, ivf_centroids_from_host,
+    make_tensor_view, matrix_from_vectors, pq_codebook_from_host,
 };
 use arrow::compute::{concat_batches, filter};
 use arrow_array::cast::AsArray;
@@ -1220,6 +1220,7 @@ pub async fn train_ivf_pq(
     }
 
     let matrix = matrix_from_vectors(&train_vectors)?;
+    enable_rmm_pool_from_env()?;
     let resources = Resources::new().map_err(|error| Error::io(error.to_string()))?;
     let index = CuvsIvfPqIndex::try_new()?;
     let params = create_index_params(
